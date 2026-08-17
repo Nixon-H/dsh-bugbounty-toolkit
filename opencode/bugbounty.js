@@ -1,6 +1,6 @@
 // dsh-bugbounty-toolkit — OpenCode adapter.
 //
-// Registers all 39 `bb_*` recon/finding tools from dsh-bugbounty plus a
+// Registers all 48 `bb_*` recon/finding tools from dsh-bugbounty plus a
 // keyless web search tool (Tavily keyless mode, no API key).
 //
 // Install locations:
@@ -171,6 +171,39 @@ const TOOL_ARGS = {
     url: tool.schema.string().describe("Login POST URL, e.g. https://target.com/api/login"),
     usernameField: tool.schema.string().optional().describe("Username field name (default username)"),
     passwordField: tool.schema.string().optional().describe("Password field name (default password)"),
+  },
+  bb_jwt_analyze: {
+    token: tool.schema.string().describe("JWT to decode/audit (header.payload.signature)"),
+  },
+  bb_cloud_storage_scan: {
+    domain: tool.schema.string().describe("Domain to derive bucket names from, e.g. example.com"),
+  },
+  bb_psbdmp_search: {
+    query: tool.schema.string().describe("Domain/email/paste keyword to search psbdmp.ws for"),
+    limit: tool.schema.number().optional().describe("Max dumps to fetch (default 20)"),
+  },
+  bb_dockerhub_search: {
+    org: tool.schema.string().describe("Docker Hub org/company to search repositories under"),
+    limit: tool.schema.number().optional().describe("Max repos/tags (default 10)"),
+  },
+  bb_dangling_cname: {
+    domain: tool.schema.string().describe("Root domain, e.g. example.com"),
+    limit: tool.schema.number().optional().describe("Max subdomains to check (default 20)"),
+  },
+  bb_dns_wildcard_probe: {
+    domain: tool.schema.string().describe("Root domain, e.g. example.com"),
+  },
+  bb_resurrected_endpoints: {
+    domain: tool.schema.string().describe("Domain to mine, e.g. example.com"),
+    limit: tool.schema.number().optional().describe("Max endpoints to probe (default 10)"),
+  },
+  bb_api_docs_diff: {
+    domain: tool.schema.string().describe("Domain to diff, e.g. example.com"),
+    specPath: tool.schema.string().optional().describe("Custom spec path (default /openapi.json)"),
+  },
+  bb_h1_intel: {
+    handle: tool.schema.string().optional().describe("HackerOne program handle, e.g. uber (default: public programs index)"),
+    limit: tool.schema.number().optional().describe("Max scope/assets (default 50)"),
   },
 };
 
