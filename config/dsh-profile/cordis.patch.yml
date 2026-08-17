@@ -1,0 +1,75 @@
+# Your patch layer for this dsh profile, applied after every bundle layer:
+# a top-level YAML array of loader patch entries (id-targeted config
+# overrides, disables, and insert lists; `!!js` expressions allowed).
+# Re-enable the shared HMR watcher (stock dsh-web-app sets `- id: hmr /
+# disabled: true` pending reload-lifecycle testing; we override it here so
+# HMR stays on across restarts).
+- id: hmr
+  disabled: false
+# Enable every row the stock dsh-web-app bundle patch statically disables
+# (plus skill-badge, which dsh-base ships disabled). Re-enabling here keeps
+# them on across restarts; the two `!!js` platform guards (bash-sandbox /
+# pwsh-sandbox) are intentionally left alone to self-select by OS.
+- id: tool-bash
+  disabled: false
+- id: tool-pwsh
+  disabled: false
+- id: tool-jobs
+  disabled: false
+- id: tool-fs
+  disabled: false
+- id: tool-fs-search
+  disabled: false
+- id: agent-instructions
+  disabled: false
+- id: skill-filesystem
+  disabled: false
+- id: skill-badge
+  disabled: false
+- id: tool-skill
+  disabled: false
+- id: plan-mode
+  disabled: false
+- id: compaction-basic
+  disabled: false
+- id: command-compact
+  disabled: false
+- id: tool-subagent-control
+  disabled: false
+- id: tool-subagent-list-agents
+  disabled: false
+- id: tool-subagent
+  disabled: false
+- id: tool-subagent-fork
+  disabled: false
+- id: workflow-worker-thread
+  disabled: false
+- id: tool-workflow
+  disabled: false
+- id: tool-result-pruner
+  disabled: false
+- id: tool-todo
+  disabled: false
+- id: tool-goal
+  disabled: false
+- id: tool-ralph
+  disabled: false
+- id: tool-str-replace-editor
+  disabled: false
+- id: tool-web
+  disabled: false
+# Web search without API keys: mount opencode's embedded keyless search
+# (Tavily keyless mode, provider `tavily-keyless` from dsh-opencode-search)
+# and leave the keyed DeepSeek/OpenRouter provider out entirely.
+- id: web
+  config:
+    searchProvider: tavily-keyless
+- id: web-search-deepseek
+  disabled: true
+- insert:
+  - id: nixon-hud
+    name: 'dsh-nixon-hud'
+  - id: opencode-search
+    name: 'dsh-opencode-search'
+  - id: bugbounty
+    name: 'dsh-bugbounty'
