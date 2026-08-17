@@ -1,6 +1,6 @@
 // dsh-bugbounty — keyless bug bounty recon & finding toolkit for DSH.
 // Zero-import pure ESM: no @deepseek-ai/* imports; global fetch/AbortController
-// only. Registers 48 `bb_*` tools (enum, probe, headers, tech, wayback, recon,
+// only. Registers 51 `bb_*` tools (enum, probe, headers, tech, wayback, recon,
 // checklist, source-audit, triage, actuator, js-secrets, 403-bypass, origin-ip,
 // crlf, swagger, s3, punycode, mass-assign, email-payloads, nextjs-cve,
 // ct-fresh-assets, wordpress, cache-deception, sqli-param-hunt, waf-fingerprint,
@@ -8,7 +8,8 @@
 // source-leak-scan, shadow-api, soft404-check, vpn-fingerprint, dns-email-audit,
 // entra-tenant-probe, cache-key-probe, ratelimit-classify, nosqli-auth-probe, jwt-analyze, cloud-storage-scan,
 // psbdmp-search, dockerhub-search, dangling-cname, dns-wildcard-probe,
-// resurrected-endpoints, api-docs-diff, h1-intel)
+// resurrected-endpoints, api-docs-diff, h1-intel,
+// idor-extract, idor-boundary-gen, idor-swap-probe)
 // plus methodology guidance at systemPrompt
 // order 115. Exports bbApi (neutral {name, execute} map) for reuse from other
 // hosts (e.g. the OpenCode adapter).
@@ -439,7 +440,19 @@ const CHECKLIST = [
 			"Iterate IDs beyond plain ints: base64-decode the ID to extract a numeric incrementor; exfil emails, order totals, payment methods across the whole customer base",
 			"UUID harvest from static JS: curl -s https://target.com/static/app.js | grep -Eo '\"id\":\"[a-f0-9-]{36}\"' | sort -u",
 			"A->B chain table: same IDOR on /v2/ -> /v1/ (missing fix) -> mobile API; IDOR on GET /api/user/X/orders -> PUT/DELETE same path -> all sibling endpoints",
-			"Zero-interaction ATO: PATCH /api/users/{victim_uid} with attacker session + {\"email\":\"attacker@evil.com\"} -> trigger password reset -> reset email arrives at attacker -> full ATO"
+			"Zero-interaction ATO: PATCH /api/users/{victim_uid} with attacker session + {\"email\":\"attacker@evil.com\"} -> trigger password reset -> reset email arrives at attacker -> full ATO",
+			"Auto-extract candidate ID fields from requests: URL path + query (split on & and ;), form body, JSON (nested objects/arrays AND bare numeric values like \"user_id\":88214), XML tags AND attributes, matrix params (;id=555;status=paid), Bearer tokens",
+			"Field-name-aware ID acceptance: a value like \"4337\" is only a candidate when the field name reads as an identifier (*_id, *_pk, *_key, or exactly \"id\") — otherwise bare numbers need >= 5 digits to cut page/quantity noise",
+			"Generic-name skip list — never treat these as ID keys: page, limit, offset, count, total, size, max, min, sort, order, direction, search, query, q, term, format, callback, token, auth, csrf, timestamp, datetime, date, time, version, build, epoch, retry, sleep, timeout, per_page",
+			"ID shape battery to hunt and swap: digit runs, UUIDs (8-4-4-4-12), Mongo ObjectIds (24-hex), 32-64 hex hashes, word_digits combos, hex_hex pairs, base64 — decode before mutating, re-encode on swap",
+			"Matrix + inline path-KV params: /api/orders;id=555;status=paid/items, comma-separated /api/x,id=555,region=eu, inline user_id=42 segments — split on ;/, then =/: to recover explicit key=value pairs instead of guessing the key from position",
+			"Baseline vs swapped scoring: same status code + sequence-diff body similarity (difflib-style sequence matching, tolerates different ID digit lengths — char-by-char compare breaks when \"7\" vs \"88214\"), never naive substring compare alone",
+			"Confidence ladder (honest heuristics, not proof): CONFIRMED (swapped value echoed in response body, min 6 chars, exclude true/false/null/undefined) > HIGH (same status + sim>=85) > MEDIUM (sim>=50) > LOW — all heuristic leads, verify manually before reporting",
+			"Deny-keyword triage: strong deny words decisive alone (permission denied, access denied, unauthorized, forbidden, not allowed, no permission, not permitted, insufficient privilege); weak words (restricted, blocked, invalid, fail, cannot, denied) only count when status is 4xx — avoids suppressing a real leak that contains a common word",
+			"Error-JSON detection: success:false, error/errors/message fields containing deny words, or status_code/statusCode/http_code/errorCode in the HTTP-error set (400-504) = blocked — a generic \"code\" field is NOT an error signal (probably promo/zip/verification code)",
+			"Swap direction discipline: only attacker->victim in default mode (reverse proves nothing and creates noise); per-key attacker/victim overrides, and pool-swap between any two previously observed IDs of the same key when no labelled pair exists",
+			"Boundary battery: 0, -1, 999999999, off-by-one (+1/-1), same-length random ID, UUID segment mutations, sibling IDs (+1/-1), parent collection IDs, remove the ID param entirely, null/empty value",
+			"Operational hygiene: skip OPTIONS, dedupe already-tested URLs, cap response comparison at ~4 KB (prefix compare for huge bodies), rebuild Content-Length after a body swap, HTML-skip toggle so generic pages don't register findings",
 		],
 		techniques: ["bb_wayback_urls (find id params)", "burp auth analyzer", "role swap", "method override", "Base64 ID swap", "Burp Intruder enumeration"]
 	},
@@ -5578,6 +5591,448 @@ const TOOLS = [
 			}
 			return out;
 		}
+	},
+	{
+		name: "bb_idor_extract",
+		description: "Field-name-aware candidate ID extraction from a URL or raw HTTP request (ported from idor-tester-ai): walks URL path + query, matrix params, form body, JSON (nested objects/arrays AND bare numeric values), XML tags AND attributes, Bearer token. A value is only accepted when it looks like an ID (field-name hint lowers the digit floor to 2; bare numbers need 5) and the key is not on the generic skip list. Pure local compute, no network.",
+		parameters: {
+			type: "object",
+			additionalProperties: false,
+			properties: {
+				request: { type: "string", description: "Full URL (https://target.com/api/users/123?user_id=4337) or raw HTTP request (request line + headers + body)" }
+			},
+			required: ["request"]
+		},
+		output: {
+			schema: {
+				type: "object",
+				properties: {
+					input: { type: "string" },
+					url: { type: "string" },
+					fields: { type: "array", items: { type: "object", additionalProperties: false, properties: { key: { type: "string" }, location: { type: "string" }, value: { type: "string" }, reason: { type: "string" } }, required: ["key", "location", "value", "reason"] } },
+					summary: { type: "string" },
+					error: { type: "string" }
+				},
+				required: ["input", "url", "fields", "summary"]
+			},
+			render: (_args, v) =>
+				renderLines("🎯 bb_idor_extract " + v.url, [
+					v.summary,
+					...v.fields.map(f => `  ${f.key} @ ${f.location} = ${f.value.slice(0, 60)} [${f.reason}]`),
+					v.error ? "error: " + v.error : ""
+				].filter(Boolean))
+		},
+		timeoutMs: 5000,
+		isConcurrencySafe: () => true,
+		async execute(args, exec) {
+			const input = String(args.request || "").trim();
+			const out = { input, url: "", fields: [], summary: "", error: "" };
+			try {
+				const SKIP = new Set(["timestamp", "datetime", "date", "time", "version", "build", "epoch", "page", "limit", "offset", "count", "total", "size", "max", "min", "sleep", "wait", "retry", "timeout", "per_page", "sort", "order", "direction", "search", "query", "q", "term", "format", "callback", "_", "t", "v", "csrf", "token", "auth"]);
+				const looksLikeId = (val, keyHint) => {
+					if (!val) return false;
+					let minDigits = 5;
+					if (keyHint) {
+						const kl = String(keyHint).toLowerCase();
+						if (kl === "id" || kl.endsWith("id") || /(^|_)(id|pk|key)(_|$)/.test(kl)) minDigits = 2;
+					}
+					if (new RegExp("^\\d{" + minDigits + ",20}$").test(val)) return true;
+					if (new RegExp("^[a-zA-Z_][a-zA-Z0-9_]*_\\d{" + minDigits + ",20}$").test(val)) return true;
+					if (val.length < 3) return false;
+					if (/^\d{5,20}_\d{5,20}$/.test(val)) return true;
+					if (/^[0-9a-f]{8,64}_[0-9a-f]{8,64}$/i.test(val)) return true;
+					if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val)) return true;
+					if (/^[0-9a-f]{24}$/i.test(val)) return true;
+					if (/^[0-9a-f]{32,64}$/i.test(val)) return true;
+					if (/^[a-zA-Z_][a-zA-Z0-9_]*_[0-9a-f]{8,64}$/i.test(val)) return true;
+					return false;
+				};
+				const validKey = (k) => { const kl = String(k || "").toLowerCase(); return kl && !SKIP.has(kl); };
+				const unq = (s) => { try { return decodeURIComponent(s); } catch { return s; } };
+				const seen = new Set();
+				const add = (key, loc, value, reason) => {
+					if (!key || !value) return;
+					if (!validKey(key)) return;
+					if (!looksLikeId(value, key)) return;
+					const dk = key + "\u0000" + value;
+					if (seen.has(dk)) return;
+					seen.add(dk);
+					out.fields.push({ key, location: loc, value: String(value).slice(0, 200), reason });
+				};
+
+				let target = "";
+				let body = "";
+				let headers = [];
+				if (/^https?:\/\//i.test(input)) {
+					target = input.split(/\s+/)[0];
+				} else {
+					const lines = input.split(/\r?\n/);
+					const m = /^(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(\S+)/i.exec(lines[0] || "");
+					if (m) target = m[1];
+					const bi = lines.indexOf("");
+					const hdr = bi >= 0 ? lines.slice(1, bi) : lines.slice(1);
+					headers = hdr;
+					if (bi >= 0) body = lines.slice(bi + 1).join("\n");
+				}
+				out.url = target;
+				const [pathPart, queryPart] = target.indexOf("?") >= 0 ? target.split("?", 2) : [target, ""];
+
+				// query params (split on & AND ;) + path positional + path-KV (matrix params)
+				if (queryPart) {
+					for (const pair of queryPart.split(/[&;]/)) {
+						if (!pair.includes("=")) continue;
+						const [k, v] = pair.split("=", 2);
+						add(unq(k), "url-query", unq(v), validKey(unq(k)) ? "query" : "query");
+					}
+				}
+				const pathParts = (pathPart.split("?")[0] || "").split("/");
+				for (let i = 0; i < pathParts.length; i++) {
+					const part = pathParts[i];
+					if (!part) continue;
+					if (looksLikeId(part)) {
+						let key = "id";
+						if (i > 0 && pathParts[i - 1]) key = pathParts[i - 1].toLowerCase().replace(/s$/, "") + "_id";
+						add(key, "url-path", part, "path-segment");
+					}
+					// matrix / inline key=value or key:value inside the segment
+					const inSeg = part.includes("=") || part.includes(":");
+					if (inSeg) {
+						for (const token of part.split(/[;,]/)) {
+							const t = token.trim();
+							if (!t) continue;
+							let k = "", v = "";
+							if (t.includes("=")) { [k, v] = t.split("=", 2); }
+							else if (t.includes(":") && !/^https?:/i.test(t)) { [k, v] = t.split(":", 2); }
+							if (!k || !v) continue;
+							add(unq(k), "url-matrix", unq(v), "matrix/kv");
+						}
+					}
+				}
+
+				// headers: Bearer token
+				for (const h of headers) {
+					const bm = /^authorization:\s*[Bb]earer\s+([a-zA-Z0-9_.\-]+)/i.exec(h);
+					if (bm && looksLikeId(bm[1])) add("authorization_token", "header", bm[1], "bearer");
+				}
+
+				// body raw regex passes (JSON quoted, JSON bare numeric, single-quoted, form, XML tag, XML attr)
+				const all = input;
+				let mm;
+				const jq = /"([a-zA-Z_][a-zA-Z0-9_\-]*)"\s*:\s*"([^"]+)"/g;
+				while ((mm = jq.exec(all))) add(mm[1], "json-raw", mm[2], "json-string");
+				const jn = /"([a-zA-Z_][a-zA-Z0-9_\-]*)"\s*:\s*(-?\d{3,20})(?=\s*[,}\]])/g;
+				while ((mm = jn.exec(all))) add(mm[1], "json-raw", mm[2], "json-number");
+				const sq = /'([a-zA-Z_][a-zA-Z0-9_\-]*)'\s*:\s*'([^']+)'/g;
+				while ((mm = sq.exec(all))) add(mm[1], "json-raw", mm[2], "json-string-sq");
+				const fm = /(?:^|[&?;\s])([a-zA-Z_][a-zA-Z0-9_\-\.\[\]]*)=([^&;\s]+)/g;
+				while ((mm = fm.exec(all))) {
+					let v = mm[2];
+					for (let k = 0; k < 3; k++) { const d = unq(v); if (d === v) break; v = d; }
+					add(mm[1], "form", v, "form-field");
+				}
+				if (body && !body.startsWith("{") && !body.startsWith("[")) {
+					const xt = /<([a-zA-Z_][\w:.\-]*)>([^<]+)<\/\1>/g;
+					while ((mm = xt.exec(body))) add(mm[1], "xml-tag", mm[2], "xml-tag");
+					const xa = /<[a-zA-Z_][\w:.\-]*[^>]*?\s([a-zA-Z_][\w\-]*)\s*=\s*"([^"]+)"/g;
+					while ((mm = xa.exec(body))) add(mm[1], "xml-attr", mm[2], "xml-attr");
+				}
+
+				// structured JSON body walk (nested keys with full paths)
+				const walkJson = (obj, prefix) => {
+					if (Array.isArray(obj)) {
+						for (let i = 0; i < obj.length; i++) {
+							const full = prefix ? prefix + "[" + i + "]" : "item[" + i + "]";
+							const parent = prefix || "item";
+							if (obj[i] && typeof obj[i] === "object") walkJson(obj[i], full);
+							else if (obj[i] !== null && obj[i] !== undefined) add(parent, "body-json", String(obj[i]), "json-array-item");
+						}
+					} else if (obj && typeof obj === "object") {
+						for (const k of Object.keys(obj)) {
+							const full = prefix ? prefix + "." + k : k;
+							const v = obj[k];
+							if (v && typeof v === "object") walkJson(v, full);
+							else if (v !== null && v !== undefined) add(k, "body-json", String(v), "json-key");
+						}
+					}
+				};
+				const tryJson = (s) => { try { return JSON.parse(s); } catch { return null; } };
+				const blob = body || (target.indexOf("?") >= 0 ? "" : "");
+				if (blob.trim().startsWith("{") || blob.trim().startsWith("[")) {
+					const j = tryJson(blob);
+					if (j) walkJson(j, "");
+				}
+
+				// signed_body / signed_payload wrappers (Instagram-style)
+				const sb = /([a-zA-Z_][a-zA-Z0-9_]*)=(signed_body|signed_payload|ig_sig_key_version)([^&;\s]*)/g;
+				while ((mm = sb.exec(all))) {
+					if (mm[3].startsWith("=")) {
+						const val = mm[3].slice(1);
+						if (val.includes(".")) {
+							const payload = unq(val.split(".", 2)[1]);
+							const j = tryJson(payload);
+							if (j) walkJson(j, "");
+						}
+					}
+				}
+
+				out.summary = "found " + out.fields.length + " candidate ID field" + (out.fields.length === 1 ? "" : "s") +
+					" (skip-list + looks-like-id heuristics, idor-tester-ai port) — inspect then swap with bb_idor_swap_probe or vary with bb_idor_boundary_gen";
+			} catch (e) {
+				out.error = shortErr(e);
+			}
+			return out;
+		}
+	},
+	{
+		name: "bb_idor_boundary_gen",
+		description: "Deterministic IDOR/BOLA boundary-test battery generator (ported from idor-tester-ai AI-skills 'IDOR Boundary Testing' + 'BOLA Deep Scan' prompts, no LLM needed): from any discovered ID value produce 0, -1, 999999999, off-by-one (+1/-1), same-length random, UUID segment mutations, sibling/parent IDs, remove-param, null/empty. Pure compute, no network.",
+		parameters: {
+			type: "object",
+			additionalProperties: false,
+			properties: {
+				id: { type: "string", description: "The discovered object ID, e.g. 88214 or a UUID" },
+				key: { type: "string", description: "Optional field name for the tests (default id)" },
+				location: { type: "string", description: "Location label for tests: URL, Body or Header (default URL)" }
+			},
+			required: ["id"]
+		},
+		output: {
+			schema: {
+				type: "object",
+				properties: {
+					id: { type: "string" },
+					shape: { type: "string" },
+					tests: { type: "array", items: { type: "object", additionalProperties: false, properties: { name: { type: "string" }, field: { type: "string" }, location: { type: "string" }, original: { type: "string" }, replacement: { type: "string" }, reason: { type: "string" } }, required: ["name", "field", "location", "original", "replacement", "reason"] } },
+					note: { type: "string" }
+				},
+				required: ["id", "shape", "tests", "note"]
+			},
+			render: (_args, v) =>
+				renderLines("🧪 bb_idor_boundary_gen " + v.id + " (" + v.shape + ")", [
+					v.note,
+					...v.tests.map(t => `  ${t.name}: ${t.field}=${t.original} -> ${t.replacement} (${t.location}) — ${t.reason}`)
+				].filter(Boolean))
+		},
+		timeoutMs: 5000,
+		isConcurrencySafe: () => true,
+		async execute(args, exec) {
+			const id = String(args.id || "").trim();
+			const key = args.key || "id";
+			const location = args.location || "URL";
+			const out = { id, shape: "unknown", tests: [], note: "" };
+			try {
+				const push = (name, replacement, reason) => {
+					out.tests.push({ name, field: key, location, original: id, replacement: String(replacement), reason });
+				};
+				const randDigits = (n) => Array.from({ length: n }, () => Math.floor(Math.random() * 10)).join("");
+				const isNumeric = /^\d+$/.test(id);
+				const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+				const isObjectId = /^[0-9a-f]{24}$/i.test(id);
+				const isHex = /^[0-9a-f]{8,64}$/i.test(id);
+				if (isNumeric || isObjectId || isHex) out.shape = "numeric/hex";
+				else if (isUuid) out.shape = "uuid";
+				else out.shape = "token/opaque";
+
+				if (isNumeric) {
+					const n = parseInt(id, 10);
+					push("zero", 0, "zero boundary — some apps treat 0 as admin/root object");
+					push("negative", -1, "negative boundary — index confusion / signed handling");
+					push("max-int", 999999999, "max_int — overflow / fallback to first record");
+					push("plus-one", n + 1, "next sibling object (off-by-one)");
+					push("minus-one", Math.max(0, n - 1), "previous sibling object (off-by-one)");
+					push("same-length-random", randDigits(String(id).length), "another random ID of the same length — pool-style cross-account swap");
+					push("empty", "", "empty value — default object / auth confusion");
+					push("null", "null", "null value (JSON) — unset object reference");
+					push("remove-param", "(remove " + key + ")", "remove the ID param entirely — list/default object exposure");
+				} else if (isUuid) {
+					push("zero-uuid", "00000000-0000-0000-0000-000000000000", "all-zero UUID — nil object handling");
+					push("flip-segment", id.slice(0, 14) + "ffff" + id.slice(18), "mutate a UUID segment — sibling guess");
+					const mut = id.slice(0, 27) + (parseInt(id.slice(27), 16) ^ 1).toString(16).padStart(12, "0");
+					push("last-nibble-xor", mut, "flip last hex nibble — adjacent UUID sibling");
+					push("same-length-random", Array.from({ length: 36 }, () => "0123456789abcdef"[Math.floor(Math.random() * 16)]).join(""), "random UUID — unidentified object guess");
+				} else {
+					push("empty", "", "empty value — default object / auth confusion");
+					push("null", "null", "null value (JSON) — unset object reference");
+					push("parent-id", id.split("_")[0] || id.split("-")[0], "parent collection / prefix ID — vertical BOLA");
+					push("same-length-random", randDigits(String(id).length) || Array.from({ length: String(id).length }, () => "abcdefghijklmnopqrstuvwxyz0123456789"[Math.floor(Math.random() * 36)]).join(""), "random same-length token — pool-style swap");
+				}
+				out.tests = out.tests.filter((t, i, a) => a.findIndex((x) => x.name === t.name && x.replacement === t.replacement) === i);
+				out.note = "deterministic battery (" + out.tests.length + " tests) — feed replacements into bb_idor_swap_probe / your request and diff against the clean baseline; heuristic leads only, verify manually";
+			} catch (e) {
+				out.error = shortErr(e);
+			}
+			return out;
+		}
+	},
+	{
+		name: "bb_idor_swap_probe",
+		description: "Active IDOR/BOLA swap test (idor-tester-ai port): sends the target request as a clean baseline, rebuilds a copy with attacker_id replaced by victim_id (URL and body), resends and scores the pair — status (+30 equal), length ratio (+20), sequence-diff body similarity (+50) — then classifies CONFIRMED (swapped ID echoed, >=6 chars, not true/false/null) / HIGH (sim>=85) / MEDIUM (sim>=50) / BLOCKED (deny keywords, error JSON, 401/403/404) / ERROR (5xx). Pure keyless HTTP — BUT this fires requests at the URL you provide: only run against endpoints you are authorized to test, never against other users' data. Findings are heuristic leads — verify manually before reporting.",
+		parameters: {
+			type: "object",
+			additionalProperties: false,
+			properties: {
+				url: { type: "string", description: "Full request URL, e.g. https://target.com/api/user/88214?user_id=4337" },
+				attacker_id: { type: "string", description: "Your (attacker) account's object ID in the request" },
+				victim_id: { type: "string", description: "The victim ID you should NOT be able to reach" },
+				method: { type: "string", description: "HTTP method (default GET)" },
+				body: { type: "string", description: "Optional raw request body to swap IDs in and resend (default none)" },
+				contentType: { type: "string", description: "Content-Type for a body-bearing request (default application/json)" }
+			},
+			required: ["url", "attacker_id", "victim_id"]
+		},
+		output: {
+			schema: {
+				type: "object",
+				properties: {
+					url: { type: "string" },
+					attacker_id: { type: "string" },
+					victim_id: { type: "string" },
+					swapped: { type: "boolean" },
+					baseline: { type: "object", properties: { status: { type: "integer" }, len: { type: "integer" } }, required: ["status", "len"] },
+					test: { type: "object", properties: { status: { type: "integer" }, len: { type: "integer" }, similarity: { type: "integer" }, echoed: { type: "boolean" }, deny: { type: "boolean" }, error_json: { type: "boolean" } }, required: ["status", "len", "similarity", "echoed", "deny", "error_json"] },
+					verdict: { type: "string", enum: ["CONFIRMED", "HIGH", "MEDIUM", "LOW", "BLOCKED", "ERROR", "EMPTY", "OTHER", "SKIPPED"] },
+					notes: { type: "array", items: { type: "string" } },
+					analysis: { type: "string" },
+					error: { type: "string" }
+				},
+				required: ["url", "attacker_id", "victim_id", "swapped", "baseline", "test", "verdict", "notes", "analysis"]
+			},
+			render: (_args, v) =>
+				renderLines("🔁 bb_idor_swap_probe " + v.url, [
+					"attacker " + v.attacker_id + " -> victim " + v.victim_id + (v.swapped ? "" : " (NOT in request — nothing to swap)"),
+					"baseline: HTTP " + v.baseline.status + " len " + v.baseline.len + " | test: HTTP " + v.test.status + " len " + v.test.len + " sim " + v.test.similarity + "%",
+					"verdict: " + v.verdict,
+					...v.notes.map((n) => "  - " + n),
+					v.analysis ? "analysis: " + v.analysis : "",
+					v.error ? "error: " + v.error : ""
+				].filter(Boolean))
+		},
+		timeoutMs: 40000,
+		isConcurrencySafe: () => true,
+		async execute(args, exec) {
+			const url = normalizeUrl(args.url);
+			const attackerId = String(args.attacker_id || "").trim();
+			const victimId = String(args.victim_id || "").trim();
+			const method = (args.method || "GET").toUpperCase();
+			const body = args.body || "";
+			const out = { url, attacker_id: attackerId, victim_id: victimId, swapped: false, baseline: { status: 0, len: 0 }, test: { status: 0, len: 0, similarity: 0, echoed: false, deny: false, error_json: false }, verdict: "SKIPPED", notes: [], analysis: "", error: "" };
+			try {
+				const STRONG_DENY = ["permission denied", "access denied", "unauthorized", "forbidden", "not allowed", "no access", "no permission", "not permitted", "not authorized", "have_no_permission", "no_permission", "not_allowed", "you do not have permission", "you don't have permission", "insufficient permission", "insufficient privilege"];
+				const WEAK_DENY = ["restricted", "blocked", "invalid", "fail", "cannot", "unable to", "privilege", "denied"];
+				const HTTP_ERR = [400, 401, 402, 403, 404, 405, 406, 408, 409, 410, 422, 429, 500, 501, 502, 503, 504];
+				const seqRatio = (a, b) => {
+					const s1 = String(a || "").replace(/\s+/g, " ").trim();
+					const s2 = String(b || "").replace(/\s+/g, " ").trim();
+					if (!s1 && !s2) return 1;
+					if (!s1 || !s2) return 0;
+					const CAP = 1200;
+					const x = s1.slice(0, CAP), y = s2.slice(0, CAP);
+					const n = x.length, m = y.length;
+					let prev = new Uint32Array(m + 1), cur = new Uint32Array(m + 1);
+					for (let i = 1; i <= n; i++) {
+						for (let j = 1; j <= m; j++) {
+							cur[j] = x[i - 1] === y[j - 1] ? prev[j - 1] + 1 : (prev[j] > cur[j - 1] ? prev[j] : cur[j - 1]);
+						}
+						const t = prev; prev = cur; cur = t; cur.fill(0);
+					}
+					return (2 * prev[m]) / (n + m);
+				};
+				const denyCheck = (txt, status) => {
+					if (!txt) return { strong: false, weak: false };
+					const low = txt.toLowerCase();
+					for (const kw of STRONG_DENY) if (low.includes(kw)) return { strong: true, weak: false };
+					if (String(status).startsWith("4")) for (const kw of WEAK_DENY) if (low.includes(kw)) return { strong: false, weak: true };
+					return { strong: false, weak: false };
+				};
+				const errorJson = (txt) => {
+					if (!txt || !txt.trim().startsWith("{")) return false;
+					try {
+						const j = JSON.parse(txt);
+						if (j && typeof j === "object") {
+							if (j.success === false) return true;
+							const msg = String(j.error || "") + " " + String(j.errors || "") + " " + String(j.message || "");
+							if (msg && STRONG_DENY.some((kw) => msg.toLowerCase().includes(kw))) return true;
+							for (const sk of ["status_code", "statusCode", "http_code", "httpCode", "errorCode", "error_code"]) {
+								if (j[sk] !== undefined && j[sk] !== null && HTTP_ERR.includes(Number(j[sk]))) return true;
+							}
+						}
+					} catch { /* not json */ }
+					return false;
+				};
+
+				// build modified target: attacker -> victim in URL and body
+				const modUrl = url.includes(attackerId) ? url.split(attackerId).join(victimId) : url;
+				const modBody = body.includes(attackerId) ? body.split(attackerId).join(victimId) : body;
+				out.swapped = modUrl !== url || modBody !== body;
+				if (!out.swapped) {
+					out.notes.push("attacker_id not present in URL or body — nothing to swap");
+					return out;
+				}
+
+				const send = async (u, b) => {
+					const budget = withBudget(exec, 15000);
+					try {
+						const r = await fetch(u, { method, signal: budget.signal, redirect: "follow", headers: { "user-agent": UA, ...(b ? { "content-type": args.contentType || "application/json" } : {}) }, ...(b ? { body: b } : {}) });
+						const txt = await readLimited(r, 4000);
+						return { status: r.status, len: (await (async () => { try { return txt.length; } catch { return 0; } })()), text: txt };
+					} finally { budget.dispose(); }
+				};
+				const base = await send(url, body);
+				const test = await send(modUrl, modBody);
+				out.baseline = { status: base.status, len: base.len };
+				out.test = { status: test.status, len: test.len, similarity: 0, echoed: false, deny: false, error_json: false };
+
+				const sim = Math.round(seqRatio(base.text, test.text) * 100);
+				out.test.similarity = sim;
+				const deny = denyCheck(test.text, test.status);
+				out.test.deny = deny.strong || deny.weak;
+				out.test.error_json = errorJson(test.text);
+				const echoed = victimId && victimId.length >= 6 && !/^(true|false|null|none|undefined)$/i.test(victimId) && test.text.includes(victimId);
+				out.test.echoed = echoed;
+				out.analysis = "Base=" + base.status + "|" + base.len + " Test=" + test.status + "|" + test.len + " Sim=" + sim + "%";
+
+				if (test.status === 200 && test.len > 0 && !out.test.deny && !out.test.error_json) {
+					if (echoed) {
+						out.verdict = "CONFIRMED";
+						out.notes.push("swapped victim ID " + victimId + " echoed in response body — cross-account data access likely");
+					} else if (base.status === test.status && sim >= 85) {
+						out.verdict = "HIGH";
+						out.notes.push("same status as baseline + high body similarity — similar valid response, verify manually");
+					} else if (base.status === test.status && sim >= 50) {
+						out.verdict = "MEDIUM";
+						out.notes.push("partial similarity with baseline — verify manually");
+					} else {
+						out.verdict = "LOW";
+						out.notes.push("different response from baseline (sim " + sim + "%)");
+					}
+				} else if (out.test.deny) {
+					out.verdict = "BLOCKED";
+					out.notes.push("permission-denied detected in test response (deny keyword" + (deny.weak ? " via 4xx weak list" : "") + ")");
+				} else if (out.test.error_json) {
+					out.verdict = "BLOCKED";
+					out.notes.push("error-shaped JSON returned (success:false / error / HTTP-status code field)");
+				} else if (test.status === 401 || test.status === 403) {
+					out.verdict = "BLOCKED";
+					out.notes.push("auth required (" + test.status + ") — access properly denied");
+				} else if (test.status === 404) {
+					out.verdict = "BLOCKED";
+					out.notes.push("not found (" + test.status + ") — object does not exist or access hidden as 404");
+				} else if (String(test.status).startsWith("5")) {
+					out.verdict = "ERROR";
+					out.notes.push("server error (" + test.status + ") — retry; may indicate crash on injected value");
+				} else if (test.status === 200 && test.len === 0) {
+					out.verdict = "EMPTY";
+					out.notes.push("200 OK with empty body");
+				} else {
+					out.verdict = "OTHER";
+					out.notes.push("unclassified status " + test.status);
+				}
+				if (out.verdict === "CONFIRMED" || out.verdict === "HIGH") out.notes.push("heuristic lead only — reproduce manually and confirm authorization impact before reporting");
+			} catch (e) {
+				out.error = shortErr(e);
+			}
+			return out;
+		}
 	}
 ];
 
@@ -5632,7 +6087,9 @@ const GUIDANCE = [
 	"- bb_dns_wildcard_probe(domain) — random-label DoH A queries; matching IP sets = wildcard DNS (poisons subdomain enumeration).",
 	"- bb_resurrected_endpoints(domain) — wayback harvest -> live probe of deleted admin/api/backup paths; ACTIVE probing, authorized targets only.",
 	"- bb_api_docs_diff(domain) — diff live OpenAPI/Swagger vs newest archive: shadow/removed endpoints surface.",
-	"- bb_h1_intel(handle?) — best-effort HackerOne scope JSON / public programs index for scope verification."
+		"bb_idor_extract parses a raw request/URL and lists field-name-aware candidate ID fields (query/path/matrix/JSON/XML/Bearer); bb_idor_boundary_gen turns any discovered ID into a 0/-1/999999999/off-by-one/UUID-mutation battery — both are pure local compute, use them before firing any swap probe.",
+	"bb_idor_swap_probe FIRES baseline + ID-swapped requests at the URL you provide — authorized targets only; CONFIRMED/HIGH are heuristic leads, verify manually before reporting (idor-tester-ai scoring).",
+"- bb_h1_intel(handle?) — best-effort HackerOne scope JSON / public programs index for scope verification."
 ].join("\n");
 
 export function apply(ctx) {

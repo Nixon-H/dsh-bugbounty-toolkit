@@ -1,6 +1,6 @@
 // dsh-bugbounty-toolkit — OpenCode adapter.
 //
-// Registers all 48 `bb_*` recon/finding tools from dsh-bugbounty plus a
+// Registers all 51 `bb_*` recon/finding tools from dsh-bugbounty plus a
 // keyless web search tool (Tavily keyless mode, no API key).
 //
 // Install locations:
@@ -204,6 +204,22 @@ const TOOL_ARGS = {
   bb_h1_intel: {
     handle: tool.schema.string().optional().describe("HackerOne program handle, e.g. uber (default: public programs index)"),
     limit: tool.schema.number().optional().describe("Max scope/assets (default 50)"),
+  },
+  bb_idor_extract: {
+    request: tool.schema.string().describe("URL or raw HTTP request (path+query+body) to mine for candidate ID fields"),
+  },
+  bb_idor_boundary_gen: {
+    id: tool.schema.string().describe("Discovered ID value to mutate (numeric, UUID or compound, e.g. 88214)"),
+    key: tool.schema.string().optional().describe("Field name hint for the ID (default user_id)"),
+    location: tool.schema.string().optional().describe("Where the ID lives: query, path, header, body (default query)"),
+  },
+  bb_idor_swap_probe: {
+    url: tool.schema.string().describe("Full request URL whose ID field you control, e.g. https://target.com/api/user/88214?user_id=4337"),
+    attacker_id: tool.schema.string().describe("Your (attacker) account's object ID in the request"),
+    victim_id: tool.schema.string().describe("The victim ID you should NOT be able to reach"),
+    method: tool.schema.string().optional().describe("HTTP method (default GET)"),
+    body: tool.schema.string().optional().describe("Optional raw request body to swap IDs in and resend (default none)"),
+    contentType: tool.schema.string().optional().describe("Content-Type for a body-bearing request (default application/json)"),
   },
 };
 

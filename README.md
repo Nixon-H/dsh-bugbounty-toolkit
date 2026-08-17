@@ -5,8 +5,8 @@ Keyless bug-bounty recon & finding toolkit for the **DeepSeek Harness (DSH web)*
 `install.sh` is a **one-click full-profile clone**: it installs *everything currently live* in the DSH profile — the 3 custom plugins, the complete `cordis.patch.yml` (all tool/plugin re-enables + keyless search provider), the keyless deepseek provider settings, and the web-search bridge.
 
 - **100% keyless** — no API keys for any data source: crt.sh, HackerTarget, Wayback CDX, Tavily keyless mode.
-- **3 DSH plugins**: `dsh-bugbounty` (48 `bb_*` tools), `dsh-opencode-search` (keyless web-search provider `tavily-keyless`), `dsh-nixon-hud` (in-browser plugins/state HUD for the DSH web GUI).
-- **OpenCode adapter** (`opencode/bugbounty.js`): registers all 48 `bb_*` tools + `bb_web_search` for [opencode](https://opencode.ai/docs/plugins) — **optional**.
+- **3 DSH plugins**: `dsh-bugbounty` (51 `bb_*` tools), `dsh-opencode-search` (keyless web-search provider `tavily-keyless`), `dsh-nixon-hud` (in-browser plugins/state HUD for the DSH web GUI).
+- **OpenCode adapter** (`opencode/bugbounty.js`): registers all 51 `bb_*` tools + `bb_web_search` for [opencode](https://opencode.ai/docs/plugins) — **optional**.
 
 ## Install — one click for DSH web (the harness)
 
@@ -43,7 +43,7 @@ The OpenCode adapter is an extra — it is *not* needed for the DSH harness:
 
 ## Tools
 
-### DSH (`dsh-bugbounty` — 48 tools)
+### DSH (`dsh-bugbounty` — 51 tools)
 
 | Tool | What it does |
 |---|---|
@@ -95,12 +95,15 @@ The OpenCode adapter is an extra — it is *not* needed for the DSH harness:
 | `bb_resurrected_endpoints(domain)` | Wayback-mined deleted/forgotten endpoints probed live — resurrected admin/API paths often lack auth (authorized only) |
 | `bb_api_docs_diff(domain)` | Live OpenAPI spec vs newest Wayback snapshot: removed/shadow + newly exposed endpoints |
 | `bb_h1_intel(handle?)` | Best-effort HackerOne scope intel (policy_scopes JSON / public programs index) for scope verification |
+| `bb_idor_extract(request)` | Parse a raw HTTP request/URL and list field-name-aware candidate ID fields (query/path/matrix/JSON/XML/Bearer) — idor-tester-ai port, pure local compute |
+| `bb_idor_boundary_gen(id, key?)` | Generate a deterministic ID boundary battery (0, -1, 999999999, +1/-1, UUID mutations, empty/null, removal) — idor-tester-ai port, pure local compute |
+| `bb_idor_swap_probe(url, attacker_id, victim_id)` | IDOR/BOLA swap probe: baseline + attacker→victim ID-swapped requests scored CONFIRMED/HIGH/MEDIUM/LOW (authorized targets only, heuristic leads) |
 
 ### DSH (`dsh-opencode-search`)
 - Registers web-search provider `tavily-keyless` (Tavily keyless mode, no API key) for the DSH `web` tool.
 
 ### OpenCode
-- All 48 `bb_*` tools (see table above) + `bb_web_search`.
+- All 51 `bb_*` tools (see table above) + `bb_web_search`.
 
 ## What's inside / merge map
 
@@ -122,10 +125,10 @@ config/dsh-profile/           # live-profile snapshot (byte-identical clones)
   settings.yaml               #   keyless deepseek providers (env-var names only — no keys)
   web-search-bridge.py        #   optional web-search-deepseek bridge
   cordis.yml / package.json / pnpm-workspace.yaml   # profile root files
-plugins/dsh-bugbounty/        # DSH plugin: 48 bb_* tools + bbApi export
+plugins/dsh-bugbounty/        # DSH plugin: 51 bb_* tools + bbApi export
 plugins/dsh-opencode-search/  # DSH plugin: tavily-keyless search provider + searchApi export
 plugins/dsh-nixon-hud/        # DSH plugin: web GUI plugins/state HUD
-opencode/bugbounty.js         # OpenCode adapter (49 tools) — optional
+opencode/bugbounty.js         # OpenCode adapter (52 tools) — optional
 tools/patch_cordis.py         # advanced: idempotent cordis.patch.yml patcher (optional utility)
 install.sh                    # DSH one-click full-profile installer
 install-opencode.sh           # OpenCode installer (optional)
