@@ -69,6 +69,57 @@ const TOOL_ARGS = {
     language: tool.schema.string().optional().describe("Optional language slug (c, cpp, rust, go, js, ts)"),
   },
   bb_triage: {},
+  bb_actuator_scan: {
+    url: tool.schema.string().describe("Full URL starting with http:// or https://"),
+  },
+  bb_js_secrets: {
+    domain: tool.schema.string().describe("Domain to query, e.g. example.com"),
+    limit: tool.schema.number().optional().describe("Max JS bundles to mine (default 30)"),
+  },
+  bb_403_bypass: {
+    url: tool.schema.string().describe("Full URL starting with http:// or https://"),
+  },
+  bb_origin_ip: {
+    domain: tool.schema.string().describe("Root domain, e.g. example.com"),
+  },
+  bb_crlf_scan: {
+    url: tool.schema.string().describe("Full URL starting with http:// or https://"),
+  },
+  bb_swagger_scan: {
+    domain: tool.schema.string().describe("Domain to query, e.g. example.com"),
+  },
+  bb_s3_probe: {
+    domain: tool.schema.string().describe("Domain to derive bucket names from, e.g. example.com"),
+  },
+  bb_punycode_gen: {
+    email: tool.schema.string().describe("Email to generate variants from (e.g. admin@example.com)"),
+    cap: tool.schema.number().optional().describe("Max homograph variants (default 18)"),
+  },
+  bb_mass_assign_gen: {},
+  bb_email_payloads: {
+    email: tool.schema.string().optional().describe("Optional email to embed in payloads"),
+  },
+  bb_nextjs_cve: {
+    url: tool.schema.string().describe("Full URL starting with http:// or https://"),
+  },
+  bb_ct_fresh_assets: {
+    domain: tool.schema.string().describe("Domain to query, e.g. example.com"),
+    limit: tool.schema.number().optional().describe("Max fresh assets to return (default 30)"),
+  },
+  bb_wordpress_surf: {
+    url: tool.schema.string().describe("Full URL starting with http:// or https://"),
+  },
+  bb_cache_deception_scan: {
+    domain: tool.schema.string().describe("Domain to query, e.g. example.com"),
+    limit: tool.schema.number().optional().describe("Max archived URLs to scan (default 600, cap 2000)"),
+  },
+  bb_sqli_param_hunt: {
+    domain: tool.schema.string().describe("Domain to query, e.g. example.com"),
+    limit: tool.schema.number().optional().describe("Max endpoints to rank (default 300)"),
+  },
+  bb_waf_fingerprint: {
+    url: tool.schema.string().describe("Full URL starting with http:// or https://"),
+  },
 };
 
 // --- compact renderer: structured bb results -> flat text for the model ---

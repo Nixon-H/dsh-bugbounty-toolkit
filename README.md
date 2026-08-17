@@ -5,8 +5,8 @@ Keyless bug-bounty recon & finding toolkit for the **DeepSeek Harness (DSH web)*
 `install.sh` is a **one-click full-profile clone**: it installs *everything currently live* in the DSH profile — the 3 custom plugins, the complete `cordis.patch.yml` (all tool/plugin re-enables + keyless search provider), the keyless deepseek provider settings, and the web-search bridge.
 
 - **100% keyless** — no API keys for any data source: crt.sh, HackerTarget, Wayback CDX, Tavily keyless mode.
-- **3 DSH plugins**: `dsh-bugbounty` (9 `bb_*` tools), `dsh-opencode-search` (keyless web-search provider `tavily-keyless`), `dsh-nixon-hud` (in-browser plugins/state HUD for the DSH web GUI).
-- **OpenCode adapter** (`opencode/bugbounty.js`): registers all 9 `bb_*` tools + `bb_web_search` for [opencode](https://opencode.ai/docs/plugins) — **optional**.
+- **3 DSH plugins**: `dsh-bugbounty` (25 `bb_*` tools), `dsh-opencode-search` (keyless web-search provider `tavily-keyless`), `dsh-nixon-hud` (in-browser plugins/state HUD for the DSH web GUI).
+- **OpenCode adapter** (`opencode/bugbounty.js`): registers all 25 `bb_*` tools + `bb_web_search` for [opencode](https://opencode.ai/docs/plugins) — **optional**.
 
 ## Install — one click for DSH web (the harness)
 
@@ -43,7 +43,7 @@ The OpenCode adapter is an extra — it is *not* needed for the DSH harness:
 
 ## Tools
 
-### DSH (`dsh-bugbounty` — 9 tools)
+### DSH (`dsh-bugbounty` — 25 tools)
 
 | Tool | What it does |
 |---|---|
@@ -53,15 +53,31 @@ The OpenCode adapter is an extra — it is *not* needed for the DSH harness:
 | `bb_tech_detect(url)` | Tech fingerprint from headers, cookies, HTML |
 | `bb_wayback_urls(domain, limit?)` | Wayback CDX mining; flags interesting endpoints/params |
 | `bb_recon(domain)` | One-shot pipeline: enum → probe → tech detect → header audit |
-| `bb_checklist(category?)` | Web/API bug-bounty methodology — 14 categories |
+| `bb_checklist(category?)` | Web/API bug-bounty methodology — 40 categories |
 | `bb_source_audit(language?)` | Segregated source-code audit methodology (C/C++/Rust/Go/JS/TS) |
 | `bb_triage()` | Rhat-scored bug triage: P(real)/P(feasible)/P(reproducible)/P(new RC)/impact → REPORT / INVESTIGATE / DISCARD |
+| `bb_actuator_scan(url)` | Spring Boot Actuator probes: /actuator/env, /heapdump, /jolokia, + path mutations |
+| `bb_js_secrets(domain, limit?)` | Wayback CDX JS-bundle mining for AWS/Google keys + JWTs |
+| `bb_403_bypass(url)` | 403 bypass battery: method flips, routing headers, path mutations |
+| `bb_origin_ip(domain)` | Origin-IP hunt: SPF records + OTX passive DNS, then header/title confirm |
+| `bb_crlf_scan(url)` | CRLF injection: %0d%0a, %00%0d%0a, GBK variants; detects injected Set-Cookie |
+| `bb_swagger_scan(domain)` | OpenAPI/Swagger endpoint discovery (22 paths) |
+| `bb_s3_probe(domain)` | Predictable S3 bucket probing: listable/open buckets |
+| `bb_punycode_gen(email, cap?)` | Homograph + punycode email variants for IDN/punycode bugs |
+| `bb_mass_assign_gen()` | Mass-assignment payloads: isAdmin/role/org/__proto__/$ne … (33) |
+| `bb_email_payloads(email?)` | Email-field payloads: case/+alias/dot/CRLF/metadata SSRF/SQLi/CMDi/homograph |
+| `bb_nextjs_cve(url)` | CVE-2025-29927: x-middleware-subrequest middleware bypass |
+| `bb_ct_fresh_assets(domain, limit?)` | crt.sh CT-log JSON: freshest certs for new asset discovery |
+| `bb_wordpress_surf(url)` | WordPress surf: REST user enum, xmlrpc.php, config backups, debug.log |
+| `bb_cache_deception_scan(domain, limit?)` | Cache-deception scan: archived account URLs + static-extension suffixes |
+| `bb_sqli_param_hunt(domain, limit?)` | Wayback+OTX endpoint mining → dynamic pages + SQLi-prone param ranking |
+| `bb_waf_fingerprint(url)` | WAF fingerprint (Cloudflare/Akamai/Imperva/AWS/F5/Azure/Sucuri) + tamper hints |
 
 ### DSH (`dsh-opencode-search`)
 - Registers web-search provider `tavily-keyless` (Tavily keyless mode, no API key) for the DSH `web` tool.
 
 ### OpenCode
-- `bb_enum_subdomains`, `bb_probe_http`, `bb_security_headers`, `bb_tech_detect`, `bb_wayback_urls`, `bb_recon`, `bb_checklist`, `bb_source_audit`, `bb_triage`, `bb_web_search`.
+- All 25 `bb_*` tools (see table above) + `bb_web_search`.
 
 ## What's inside / merge map
 
@@ -69,7 +85,7 @@ Built from the last-night bughunt research (everything merged into plugin code):
 
 | Bughunt artifact | Lives now in |
 |---|---|
-| `rules/bug-bounty.md` | `bb_checklist` (14 categories: recon, IDOR/BAC, SSRF, auth, XSS, SQLi, business logic, API misconfig, subdomain takeover, CSRF/open redirect, file upload, engagement, reporting…) |
+| `rules/bug-bounty.md` | `bb_checklist` (40 categories: recon, IDOR/BAC, SSRF, auth, XSS, SQLi, business logic, API misconfig, subdomain takeover, CSRF/open redirect, file upload, engagement, reporting + 26 article-derived categories: actuator, js-recon, origin-ip, crlf, host-header, rate-limit, 403-bypass, email-field, mass-assignment, punycode, blind-xss, waf-bypass, framework-cves, github-recon, iis-fuzzing, nuclei-dast, s3-recon, swagger, wayback-mining, fuzz-pipeline, sqli-recon, open-redirect, cache-deception, wordpress, ct-monitor, registration-flows…) |
 | `rules/source-audit.md` | `bb_source_audit` (7-step audit flow, per-language checks + grep patterns) |
 | `rules/shell-strategy.md` | Engagement/ops guidance (scope-first, 24h disclosure) |
 | `obsidian-templates/bug-report.md` + `FINDINGS.md` (SQLite audit, verdict classes) | `bb_triage` |
@@ -83,10 +99,10 @@ config/dsh-profile/           # live-profile snapshot (byte-identical clones)
   settings.yaml               #   keyless deepseek providers (env-var names only — no keys)
   web-search-bridge.py        #   optional web-search-deepseek bridge
   cordis.yml / package.json / pnpm-workspace.yaml   # profile root files
-plugins/dsh-bugbounty/        # DSH plugin: 9 bb_* tools + bbApi export
+plugins/dsh-bugbounty/        # DSH plugin: 25 bb_* tools + bbApi export
 plugins/dsh-opencode-search/  # DSH plugin: tavily-keyless search provider + searchApi export
 plugins/dsh-nixon-hud/        # DSH plugin: web GUI plugins/state HUD
-opencode/bugbounty.js         # OpenCode adapter (10 tools) — optional
+opencode/bugbounty.js         # OpenCode adapter (26 tools) — optional
 tools/patch_cordis.py         # advanced: idempotent cordis.patch.yml patcher (optional utility)
 install.sh                    # DSH one-click full-profile installer
 install-opencode.sh           # OpenCode installer (optional)
