@@ -1,6 +1,6 @@
 // dsh-bugbounty-toolkit — OpenCode adapter.
 //
-// Registers all 28 `bb_*` recon/finding tools from dsh-bugbounty plus a
+// Registers all 39 `bb_*` recon/finding tools from dsh-bugbounty plus a
 // keyless web search tool (Tavily keyless mode, no API key).
 //
 // Install locations:
@@ -129,6 +129,48 @@ const TOOL_ARGS = {
   bb_sensitive_files: {
     domain: tool.schema.string().describe("Domain to mine, e.g. example.com"),
     limit: tool.schema.number().optional().describe("Max URLs to return (default 60)"),
+  },
+  bb_ntlm_probe: {
+    url: tool.schema.string().describe("Base URL to probe, e.g. https://target.com"),
+  },
+  bb_graphql_introspection: {
+    url: tool.schema.string().describe("Base URL to probe, e.g. https://target.com"),
+  },
+  bb_source_leak_scan: {
+    url: tool.schema.string().describe("Base URL to scan, e.g. https://target.com"),
+    maps: tool.schema.boolean().optional().describe("Also derive and fetch the live JS .js.map sourcemap (default true)"),
+  },
+  bb_shadow_api: {
+    url: tool.schema.string().describe("Base API URL, e.g. https://target.com/api/v1"),
+    version_params: tool.schema.boolean().optional().describe("Also test versioned query/body params (default true)"),
+  },
+  bb_soft404_check: {
+    url: tool.schema.string().describe("Suspected exposure URL to rule out, e.g. https://target.com/.env"),
+  },
+  bb_vpn_fingerprint: {
+    host: tool.schema.string().describe("Hostname or IP to probe (no scheme, no path)"),
+  },
+  bb_dns_email_audit: {
+    domain: tool.schema.string().describe("Root domain to audit, e.g. example.com"),
+  },
+  bb_entra_tenant_probe: {
+    domain: tool.schema.string().describe("Domain to fingerprint, e.g. example.com"),
+    user: tool.schema.string().optional().describe("Optional username prefix (default admin)"),
+  },
+  bb_cache_key_probe: {
+    url: tool.schema.string().describe("Full URL to test, e.g. https://target.com/account"),
+    headers: tool.schema.array(tool.schema.string()).optional().describe("Extra headers to test (default x-forwarded-host, x-original-url, x-forwarded-for)"),
+  },
+  bb_ratelimit_classify: {
+    url: tool.schema.string().describe("Login POST URL, e.g. https://target.com/api/login"),
+    bursts: tool.schema.number().optional().describe("Requests per burst (default 10, max 15)"),
+    contentType: tool.schema.string().optional().describe("Body content type (default application/json)"),
+    body: tool.schema.string().optional().describe("Login body template (default {\"username\":\"pentest\\u0040example.com\",\"password\":\"wrongpass123\"})"),
+  },
+  bb_nosqli_auth_probe: {
+    url: tool.schema.string().describe("Login POST URL, e.g. https://target.com/api/login"),
+    usernameField: tool.schema.string().optional().describe("Username field name (default username)"),
+    passwordField: tool.schema.string().optional().describe("Password field name (default password)"),
   },
 };
 
