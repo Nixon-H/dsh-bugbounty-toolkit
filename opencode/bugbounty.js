@@ -1,6 +1,6 @@
 // dsh-bugbounty-toolkit — OpenCode adapter.
 //
-// Registers the 9 `bb_*` recon/finding tools from dsh-bugbounty plus a
+// Registers all 28 `bb_*` recon/finding tools from dsh-bugbounty plus a
 // keyless web search tool (Tavily keyless mode, no API key).
 //
 // Install locations:
@@ -119,6 +119,16 @@ const TOOL_ARGS = {
   },
   bb_waf_fingerprint: {
     url: tool.schema.string().describe("Full URL starting with http:// or https://"),
+  },
+  bb_cors_scan: {
+    url: tool.schema.string().describe("Full URL starting with http:// or https://"),
+  },
+  bb_git_exposure: {
+    url: tool.schema.string().describe("Full URL starting with http:// or https://"),
+  },
+  bb_sensitive_files: {
+    domain: tool.schema.string().describe("Domain to mine, e.g. example.com"),
+    limit: tool.schema.number().optional().describe("Max URLs to return (default 60)"),
   },
 };
 

