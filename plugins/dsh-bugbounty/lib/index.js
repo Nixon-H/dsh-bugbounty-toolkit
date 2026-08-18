@@ -456,8 +456,9 @@ const CHECKLIST = [
 			"Operational hygiene: skip OPTIONS, dedupe already-tested URLs, cap response comparison at ~4 KB (prefix compare for huge bodies), rebuild Content-Length after a body swap, HTML-skip toggle so generic pages don't register findings",
 		"Derivative-endpoint permission bypass: primary endpoints enforce auth but scan/preview/export/print twins don't \u2014 test /scan, /preview, /export, /print variants of every protected resource",
 		"Live-ID polling + auth-inheritance probing: poll last_message_id / event-sideband endpoints for newly created object IDs (new-entity enumeration), and probe unprotected subdirectories of authenticated areas for missing auth inheritance",
+		"Verbosity-differential BFLA oracle: map per-endpoint response differences across identities \u2014 'Not found' (resolver executed) vs 'Access denied' (authz enforced) reveals object existence; body/status diff between own and other IDs exposes which resolver ran; use error-message verbosity to enumerate objects without direct access",
 		],
-		techniques: ["bb_wayback_urls (find id params)", "burp auth analyzer", "role swap", "method override", "Base64 ID swap", "Burp Intruder enumeration", "derivative-endpoint (scan/preview/export)", "live-ID polling", "auth-inheritance subdir probes"]
+		techniques: ["bb_wayback_urls (find id params)", "burp auth analyzer", "role swap", "method override", "Base64 ID swap", "Burp Intruder enumeration", "derivative-endpoint (scan/preview/export)", "live-ID polling", "auth-inheritance subdir probes", "verbosity-differential BFLA oracle"]
 	},
 	{
 		slug: "ssrf",
@@ -680,8 +681,9 @@ const CHECKLIST = [
 			"Signature/path-verification hijack: path traversal in a signature/verification param whose verified path is later re-requested with a DIFFERENT method (GET-verified path re-requested as DELETE) = arbitrary-method state-changing CSRF",
 			"Destructive-action re-auth: password change, 2FA disable, API-key revoke, backup delete, and account-deletion endpoints must re-prompt for credentials/re-auth — if the destructive action rides on the ambient session cookie alone, it is CSRF-able from any cross-origin top-level navigation",
 		"DNS-rebinding CSRF: attacker domain that alternates between the attacker IP and the victim's LAN IP \u2014 same-origin bypass reaches local-network device UIs (Starlink Dishy/Router class) with no CORS preflight on state-changing requests; pair with a local discovery phase (which ports/services the device exposes)",
+		"CSRF-token hygiene battery: token present but NOT session-bound (self-acquired token reusable against other users); double-submit token embedded in the auth JWT reused as X-XSRF-TOKEN; nonce surviving user-id/account-identity change (valid post-takeover); token-management endpoints (own + sibling tokens) gated by CSRF alone with no re-auth",
 		],
-		techniques: ["SameSite=lax bypass", "CORS audit", "OAuth redirect chain", "bb_wayback_urls (find redirect params)", "signature param method-flip CSRF", "destructive action re-auth check", "DNS-rebinding CSRF on device UIs"]
+		techniques: ["SameSite=lax bypass", "CORS audit", "OAuth redirect chain", "bb_wayback_urls (find redirect params)", "signature param method-flip CSRF", "destructive action re-auth check", "DNS-rebinding CSRF on device UIs", "CSRF-token hygiene battery"]
 	},
 	{
 		slug: "file-upload",
@@ -693,9 +695,10 @@ const CHECKLIST = [
 			"Path traversal in filename (..%2f, absolute paths) and symlink/zipslip on archive extraction",
 			"Stored XSS via HTML/SVG upload; XXE or RCE via XML/SVG/ImageMagick parsing",
 			"Browser-engine MIME render matrix: MIME type NOT on the deny-list but rendered as HTML by a specific engine (video/mp2t on WebKit/iOS — a .png with an HTML body + mimeType=video/mp2t renders inline) — test per engine, not just the shared MIME allow-list",
-			"Mutate the 'mimeType' upload PARAM (not the Content-Type header) after upload — flipping it switches Content-Disposition inline vs attachment and can turn a download-only object into an inline HTML render"
+			"Mutate the 'mimeType' upload PARAM (not the Content-Type header) after upload — flipping it switches Content-Disposition inline vs attachment and can turn a download-only object into an inline HTML render",
+		"Filename/metadata string as the injection sink: payload in the FILENAME (not the file content) rendered in admin/support UI, approval emails, or export lists \u2014 second-order stored XSS via filename metadata; test filenames with HTML/JS that survive display contexts",
 		],
-		techniques: ["polyglot files", "magic byte spoofing", "ImageMagick/XML payloads", "zipslip", "engine MIME render matrix", "mimeType param flip"]
+		techniques: ["polyglot files", "magic byte spoofing", "ImageMagick/XML payloads", "zipslip", "engine MIME render matrix", "mimeType param flip", "filename-metadata second-order XSS sink"]
 	},
 	{
 		slug: "engagement",
@@ -735,9 +738,10 @@ const CHECKLIST = [
 			"Register аdmin@example.com (xn--dmin-7cd@example.com) vs admin@example.com; look for a normalization collision enabling takeover",
 			"Partial-construction race: register an arbitrary email, then confirm it through the construction window with a blank token — POST /register + GET /confirm?token= fired together, repeat ~20 rounds",
 			"CAPTCHA placement gaps: CAPTCHA on the registration form but forgotten on password reset, API endpoint, or mobile API path (/api/register vs /register)",
-			"Response-diff enumeration on forgot-password: valid vs invalid email produce different responses"
+			"Response-diff enumeration on forgot-password: valid vs invalid email produce different responses",
+		"Password-policy audit: common-password blacklist testing (top-1k/123456/12345/qwerty stuffing battery for mass ATO), minimum-length/char-class enumeration \u2014 weak policy (min 5 chars, no specials) chains with brute force for ATO; policy is a finding only when it enables account compromise",
 		],
-		techniques: ["signup endpoint crawl (/api/v1/register, /auth/create, /user/create, /legacy/signup, /mobile/register)", "Burp Intruder numbers for OTP/rate-limit", "punycode homograph collider", "session fixation probes"]
+		techniques: ["signup endpoint crawl (/api/v1/register, /auth/create, /user/create, /legacy/signup, /mobile/register)", "Burp Intruder numbers for OTP/rate-limit", "punycode homograph collider", "session fixation probes", "password-policy/common-password audit"]
 	},
 	{
 		slug: "actuator",
@@ -1590,8 +1594,9 @@ const CHECKLIST = [
 			"HTML comments: TODO-remove-before-prod, credentials/paths in comments; actuator alt paths when /actuator is blocked (/actuator/env, /env, /health)",
 			"Beyond .git: .svn exposure — /.svn/entries (working-copy paths), /.svn/wc.db (SQLite with original file contents), /.svn/text-base/ + pristine/ checksum files — full source recovery from an exposed .svn tree",
 		"Runtime telemetry/debug endpoint battery: Apache mod_status/mod_info, nginx stub_status, phpinfo, Go /debug/pprof/* + /debug/vars + expvar (CVE-2019-11248 class \u2014 heap dumps expose secrets), ELMAH.axd, Django DEBUG traceback \u2014 mine telemetry/pprof/heap output for credentials, tokens, and internal hostnames before triaging impact",
+		"Error-disclosure battery: oversized-input (100k+ chars) forces framework stack traces on login/parse endpoints; JSON-RPC internal error-detail leakage; debug-level verbosity triage (dev/staging builds echo full exceptions); map which endpoints reveal internals before impact triage",
 		],
-		techniques: ["bb_source_leak_scan", "quick-win path loop", ".js.map rotation", "git-dumper + trufflehog", "asset-manifest inventory", "build-info CVE targeting", ".svn wc.db recovery", "runtime telemetry endpoints (pprof, mod_status, ELMAH)"]
+		techniques: ["bb_source_leak_scan", "quick-win path loop", ".js.map rotation", "git-dumper + trufflehog", "asset-manifest inventory", "build-info CVE targeting", ".svn wc.db recovery", "runtime telemetry endpoints (pprof, mod_status, ELMAH)", "error-disclosure battery (oversized-input stack trace, JSON-RPC error detail)"]
 	},
 	{
 		slug: "shadow-api",
@@ -1739,8 +1744,9 @@ const CHECKLIST = [
 			"App-only API endpoints are often unauth ('no auth on some routes assuming only mobile clients hit this'); insecure deep links example://login?token=... -> ATO chains",
 		"WebView address-bar/URL spoofing: in-app browser (WebView) renders attacker-controlled content under a faked chrome/address bar \u2014 URL-spoofing phishing inside the trusted app UI; test by navigating the in-app browser to attacker URLs and inspecting the rendered chrome",
 		"WebView -> OS URI-scheme handler invocation: client opens custom:// / intent:// / app-scheme URLs fetched from server responses without a scheme allow-list \u2014 unvalidated server-derived URLs reach OS URI-scheme handlers (RCE/credential-phishing via scheme handlers); audit every server-controlled URL flowing into webView.loadUrl / intent parsing",
+		"ContentProvider-driven save-flow filename traversal: caller-controlled ContentProvider DISPLAY_NAME feeding a save-as filename (provider save flows beyond web-upload filename traversal) \u2014 path-traverse via the provider metadata, not the upload request",
 		],
-		techniques: ["APKPure mirror pull", "jadx secret grep", "iOS OTA manifest.plist", "TestFlight beta diff", "API surface re-hunt", "Frida pinning bypass", "WebView URL spoofing", "WebView -> URI-scheme handler invocation"]
+		techniques: ["APKPure mirror pull", "jadx secret grep", "iOS OTA manifest.plist", "TestFlight beta diff", "API surface re-hunt", "Frida pinning bypass", "WebView URL spoofing", "WebView -> URI-scheme handler invocation", "ContentProvider save-flow filename traversal"]
 	},
 	{
 		slug: "cloud-misconfig",
@@ -1854,8 +1860,15 @@ const CHECKLIST = [
 		"First-depositor / share-inflation detail: L=(x+y) vs sqrt(x*y) makes minShares ineffective on the first deposit; share-decimal vs reward-token-decimal mismatch inflates rewards 10^12x -> reward-fund drain; ERC4626 rewards-cycle boundary timing (syncRewards ending a cycle ~instantly, repeated compounding); seed-in-initializer mitigation",
 		"Signature malleability & replay battery: ECDSA s-range malleability (65-byte vs compact to2098Format) breaking signature-cancellation lists; v==27||v==28 strictness (OZ ECDSA > 4.7.3); chainID replay; allowance double-spend race; compact-sig DoS",
 		"Vesting/withdrawal-window timing: linear unlock vs strict window-end condition (permanently unclaimable tokens); permissionless VestingWallet.release() with a stuck beneficiary; vesting start = deployment vs activation; issue-and-cancel flash-loan griefing (cancel does not regress the vesting horizon); flash-loan spot-share gaming at claim time; unbounded vesting-loop OOG DoS",
+		"ID-accounting battery: 1-based IDs with swap-remove -> duplicate IDs / underflow / re-add bypass; numeric-ID reuse or stale references (recycled order ids letting one user cancel another's live order via an NFT transfer hook); credential-material IDOR (temporary/reset passwords leaked then logged in with directly)",
+		"Reentrancy composer & cross-chain reentrancy: unauth factory + malicious-router injection re-entering a settlement before it is marked executed; a VirtualAccount re-entering anyExecute on ANOTHER chain (local lock bypassed, gas state deleted -> free calls); token-callback reentrancy surfaces (_safeMint/onERC721Received, ERC777 hooks) re-entering before effects (expiry/votes set after mint)",
+		"zk/prover integrity battery: hint-authority audit (patch_hint PoC shape), opcode limb-range constraints after subtraction (div/shr borrow-flow, conditionally_enforce gates), log-sorter/fat-pointer circuit invariants (reverted logs must not emit; zero-fill out-of-bounds reads), prover-fee assignment hooks (malicious proposer forces others to pay)",
+		"EIP-4337 / paymaster gas-accounting battery: every refund formula audited for missing subtractions (maxRefundedGas passed to paymaster postTransaction, operator refund, pubdata subtraction) and capped by gasLimit; overinflated refundGas steals user gas; sponsored-op one-time-use replay; relayer gas-model manipulation (zero-padded calldata, 4 vs 8 gas/byte)",
+		"Ordered-list / index invariants: SortedCdps order break via deferred batchRemove vs immediate reinsert of a partially-redeemed node; hint validation surface (_upperPartialRedemptionHint/_lowerPartialRedemptionHint); post-mutation index assumption (new entity assumed at index count-1 when it can sort lower \u2014 capture the id returned by the mutating call)",
+		"Gas-budget freeze & fallback-unreachability DoS: forceRevert + redeposit freezing all cross-chain messaging (gas-budget exhaustion); one-sided-success fallback (main call succeeds, fallback fails) making a deposit irrevocable",
+		"State-keying mismatch: state mapped on a function PARAMETER instead of caller identity (claimed[_to] vs claimed[msg.sender]) enabling repeat-withdraw drain; proposal state keyed to msg.sender but executed against the owner param (approval-based caller != owner)",
 		],
-		techniques: ["TVL/audit kill gates", "mint/permanent_delegate rug", "reward invariant greps", "reentrancy/oracle checks", "Foundry forge test PoC", "proxy initialize bypass", "oracle circuit-breaker audit", "liquidation invariant battery", "reentrancy-guard lifecycle", "Certora formal verification", "CDP sorted-list invariants", "liquidation-economics invariants", "oracle roundId/staleness/circuit-breaker bounds", "MEV/sandwich class", "ERC20 transport (transferFrom return, USDT no-return, native-wrapped address(0))", "cross-chain payload validation + from-authz", "seaport/order-book zone invariants", "first-depositor share-inflation detail", "ECDSA malleability battery", "vesting-window timing"]
+		techniques: ["TVL/audit kill gates", "mint/permanent_delegate rug", "reward invariant greps", "reentrancy/oracle checks", "Foundry forge test PoC", "proxy initialize bypass", "oracle circuit-breaker audit", "liquidation invariant battery", "reentrancy-guard lifecycle", "Certora formal verification", "CDP sorted-list invariants", "liquidation-economics invariants", "oracle roundId/staleness/circuit-breaker bounds", "MEV/sandwich class", "ERC20 transport (transferFrom return, USDT no-return, native-wrapped address(0))", "cross-chain payload validation + from-authz", "seaport/order-book zone invariants", "first-depositor share-inflation detail", "ECDSA malleability battery", "vesting-window timing", "ID-accounting (1-based/swap-remove, ID reuse)", "reentrancy composer + cross-chain", "zk/prover hint-authority battery", "EIP-4337 paymaster gas accounting", "SortedCdps ordered-list invariants", "gas-budget freeze DoS", "state-keying mismatch"]
 	},
 	{
 		slug: "offensive-osint",
