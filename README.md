@@ -53,7 +53,7 @@ The OpenCode adapter is an extra — it is *not* needed for the DSH harness:
 | `bb_tech_detect(url)` | Tech fingerprint from headers, cookies, HTML |
 | `bb_wayback_urls(domain, limit?)` | Wayback CDX mining; flags interesting endpoints/params |
 | `bb_recon(domain)` | One-shot pipeline: enum → probe → tech detect → header audit |
-| `bb_checklist(category?)` | Web/API bug-bounty methodology — 89 categories |
+| `bb_checklist(category?)` | Web/API bug-bounty methodology — 90 categories |
 | `bb_source_audit(language?)` | Segregated source-code audit methodology (C/C++/Rust/Go/JS/TS) |
 | `bb_triage()` | Rhat-scored bug triage: P(real)/P(feasible)/P(reproducible)/P(new RC)/impact → REPORT / INVESTIGATE / DISCARD |
 | `bb_actuator_scan(url)` | Spring Boot Actuator probes: /actuator/env, /heapdump, /jolokia, + path mutations |
