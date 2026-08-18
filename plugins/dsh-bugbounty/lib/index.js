@@ -905,9 +905,10 @@ const CHECKLIST = [
 			"Try special chars, encoded values and path traversal (target.com%00.attacker.com, %74%61%72%67%65%74.com, ../../attacker.com); look for parser errors",
 			"Full header set: Host: attacker.com / X-Forwarded-Host: attacker.com / X-Host: attacker.com / X-Forwarded-Server: attacker.com / dual-Host smuggling 'Host: target.com\\r\\nHost: attacker.com'",
 			"False-positive killer: many apps put attacker.com in the email but the actual link domain is server-pinned — READ the actual email (OOB confirm via controlled inbox/Collaborator), do not infer from the reflected header",
-			"<base href> tag hijack: if a page builds <base href> from the Host/X-Forwarded-Host header, forging the Host makes ALL relative assets (JS/CSS/images) resolve to the attacker's origin — verify the attacker domain receives the subsequent relative-asset requests"
+			"<base href> tag hijack: if a page builds <base href> from the Host/X-Forwarded-Host header, forging the Host makes ALL relative assets (JS/CSS/images) resolve to the attacker's origin — verify the attacker domain receives the subsequent relative-asset requests",
+		"IPv6 zoneid & host-identity normalization battery: test host/address identity the way SECURITY comparisons do vs the way ROUTING does \u2014 these can use different components (hostname vs IP vs port vs IPv6 zone index); IPv6 zoneid / scoped link-local credential-leak battery (link-local scopes and zone indices: %25zone in URLs, cross-interface state bleed when connection reuse ignores the zone index); normalization differentials (trailing dot, case, percent-encoding, IPv4-mapped IPv6) as the root of bypasses between enforcement and dispatch\"",
 		],
-		techniques: ["X-Forwarded-Host reset/redirect poisoning", "ffuf Host: FUZZ wordlist", "duplicate Host / absolute URL", "header-based SQLi/XSS payloads", "base-tag hijack"]
+		techniques: ["X-Forwarded-Host reset/redirect poisoning", "ffuf Host: FUZZ wordlist", "duplicate Host / absolute URL", "header-based SQLi/XSS payloads", "base-tag hijack", "IPv6 zoneid & host-identity normalization battery (security-comparison vs routing components, scoped link-local credentials, zone-index reuse, normalization differentials)"]
 	},
 	{
 		slug: "rate-limit",
