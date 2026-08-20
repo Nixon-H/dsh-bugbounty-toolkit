@@ -5943,8 +5943,10 @@ const TOOLS = [
 				if (header.jku) out.findings.push({ severity: "MED", text: "jku present (" + String(header.jku).slice(0, 60) + ") — server may fetch attacker JWKS = SSRF/trust-chain bypass" });
 				if (header.x5u) out.findings.push({ severity: "MED", text: "x5u present — external cert URL may be attacker-controlled" });
 				const now = Math.floor(Date.now() / 1000);
+				const expNum = payload.exp === undefined ? NaN : Number(payload.exp);
 				if (payload.exp === undefined) out.findings.push({ severity: "LOW", text: "no exp claim — token never expires" });
-				else if (typeof payload.exp === "number" && payload.exp < now) out.findings.push({ severity: "MED", text: "exp " + payload.exp + " is in the past (now " + now + ") — server accepting it = replay surface" });
+				else if (Number.isFinite(expNum) && expNum < now) out.findings.push({ severity: "MED", text: "exp " + payload.exp + " is in the past (now " + now + ") — server accepting it = replay surface" });
+				else if (!Number.isFinite(expNum)) out.findings.push({ severity: "LOW", text: "exp \"" + payload.exp + "\" is not a numeric timestamp — verify how the server parses it (string-typed exp is ignored by many JWT libs)" });
 				for (const k of Object.keys(payload)) {
 					const v = payload[k];
 					if (/^(role|roles|scope|user_id|uid|admin|is_admin|permissions|group|groups|tenant|org|account_type|verified)$/i.test(k)) out.claims.push(k + "=" + JSON.stringify(v));
@@ -5994,9 +5996,11 @@ const TOOLS = [
 		timeoutMs: 120000,
 		isConcurrencySafe: () => true,
 		async execute(args, exec) {
-			const d = normalizeDomain(args.domain);
-			const out = { domain: d, azure: [], gcp: [], firebase: [], checked: 0, note: "" };
+			const out = { domain: String(args.domain || ""), azure: [], gcp: [], firebase: [], checked: 0, note: "" };
 			try {
+				const d = normalizeDomain(args.domain);
+				if (!DOMAIN_RE.test(d)) throw new Error(`invalid domain: "${d}" — use a bare hostname like example.com`);
+				out.domain = d;
 				const stem = d.split(".")[0];
 				const names = uniq([
 					d, d + "-backup", d + "-bak", d + "-assets", d + "-static", d + "-data", d + "-uploads",
@@ -6308,7 +6312,13 @@ const TOOLS = [
 				for (const s of ipSets) freq[s] = (freq[s] || 0) + 1;
 				const max = Math.max(0, ...Object.values(freq));
 				out.wildcard = max >= 2;
-				if (out.wildcard) out.note = "random labels resolve to the same IP set (" + Object.keys(freq).find((k) => freq[k] === max) + ") — subdomain brute-force/enumeration will show false positives; filter before probing.";
+				// round-robin coverage: a wildcard farm answering 1-of-N A records per query yields
+				// different ipSets per label — detect shared IPs across all labels as a fallback signal
+				if (!out.wildcard && out.labels.length >= 3 && out.labels.every((l) => l.ips.length)) {
+					const common = out.labels[0].ips.filter((ip) => out.labels.slice(1).every((l) => l.ips.includes(ip)));
+					if (common.length) { out.wildcard = true; out.note = "all random labels share IP(s) " + common.join(",") + " — round-robin wildcard DNS (answers rotate across A records); filter before probing."; }
+				}
+				if (out.wildcard && !/round-robin/.test(out.note)) out.note = "random labels resolve to the same IP set (" + Object.keys(freq).find((k) => freq[k] === max) + ") — subdomain brute-force/enumeration will show false positives; filter before probing.";
 				else if (!out.labels.some((l) => l.ips.length)) out.note = "no random label resolved — clean zone, or resolution blocked.";
 			} catch (e) {
 				out.error = shortErr(e);
@@ -6824,7 +6834,7 @@ const TOOLS = [
 					const lastNibble = parseInt(id.slice(35), 16);
 					const mut = id.slice(0, 35) + (lastNibble ^ 1).toString(16);
 					push("last-nibble-xor", mut, "flip last hex nibble — adjacent UUID sibling");
-					push("same-length-random", Array.from({ length: 36 }, () => "0123456789abcdef"[Math.floor(Math.random() * 16)]).join(""), "random UUID — unidentified object guess");
+					push("same-length-random", (() => { const h = () => "0123456789abcdef"[Math.floor(Math.random() * 16)]; return `${h()}${h()}${h()}${h()}${h()}${h()}${h()}${h()}-${h()}${h()}${h()}${h()}-${h()}${h()}${h()}${h()}-${h()}${h()}${h()}${h()}-${h()}${h()}${h()}${h()}${h()}${h()}${h()}${h()}${h()}${h()}${h()}${h()}`; })(), "random same-shape UUID (8-4-4-4-12, all hex) — unidentified object guess");
 				} else {
 					push("empty", "", "empty value — default object / auth confusion");
 					push("null", "null", "null value (JSON) — unset object reference");
