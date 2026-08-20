@@ -123,6 +123,41 @@ function normalizeUrl(u) {
 	return s;
 }
 
+// clampLimit(raw, def, {min, max}) — NaN/negative/absent -> def, else clamped to [min,max].
+// The single place the "Math.min(Math.max(parseInt(x)||d,1),cap)" idiom lives; copy in
+// bb_* tools instead of hand-rolling + limit-error variants.
+function clampLimit(raw, def = 20, min = 1, max = 100) {
+	const n = Number(raw);
+	if (raw === undefined || raw === null || raw === "" || Number.isNaN(n)) return def;
+	return Math.min(Math.max(Math.trunc(n), min), max);
+}
+
+// budgetFit(totalMs, perFetchMs, count, conc) — worst-case wallclock for `count` fetches of
+// `perFetchMs` at `conc` concurrency (rounds * perFetch). Returns null when it exceeds totalMs
+// so callers can scale perFetch down: scale = budgetFit(...) ?? floor(totalMs/rounds).
+function budgetFit(totalMs, perFetchMs, count, conc) {
+	if (!count || count <= 0) return 0;
+	const c = Math.max(1, conc);
+	const rounds = Math.ceil(count / c);
+	const wall = rounds * perFetchMs;
+	return wall <= totalMs ? wall : null;
+}
+
+// deadlineExec(exec, ms) — aggregate per-tool deadline: returns a shallow clone of exec whose
+// signal aborts when EITHER the caller's signal fires OR `ms` elapses. Pass this clone to every
+// fetch in a tool whose per-fetch budgets SUM past timeoutMs (api_docs_diff, ssrf, dangling...),
+// so the whole run self-bounds even though each fetch has its own budget. After the deadline all
+// remaining fetches reject instantly (aborted signal) and the tool returns partial data.
+function deadlineExec(exec, ms) {
+	if (!exec || typeof AbortSignal.any !== "function" || !exec.signal) return exec;
+	try {
+		const ctrl = new AbortController();
+		const t = setTimeout(() => ctrl.abort(), Math.max(1, Number(ms) || 0));
+		ctrl.signal.addEventListener("abort", () => clearTimeout(t), { once: true });
+		return { ...exec, signal: AbortSignal.any([exec.signal, ctrl.signal]) };
+	} catch { return exec; }
+}
+
 function normPorts(raw) {
 	if (raw === undefined) return [80, 443];
 	if (!Array.isArray(raw)) throw new Error("ports must be an array of integers, e.g. [80,443]");
@@ -367,7 +402,7 @@ async function techDetect(url, exec) {
 			if (p.hint && body.includes(p.hint)) push(p.category, p.name, p.hint);
 			else if (p.re && p.re.test(body)) push(p.category, p.name, p.re.source.slice(0, 80));
 		}
-		if (h["x-generator"]) push("other", h["x-generator"], "x-generator");
+		if (h["x-generator"]) push("other", String(h["x-generator"]).replace(/["']/g, "").slice(0, 60), "x-generator");
 		base.tech = tech.slice(0, 25);
 	} catch (e) {
 		base.error = shortErr(e);
@@ -2549,7 +2584,11 @@ async function spfTxt(domain, exec) {
 	const allIps = new Set();
 	const includes = [];
 	let errors = [];
+	let totalResolved = 0;
+	const MAX_RESOLVES = 12; // width cap — one domain with N includes must not cost N×12s serial; worst 12×12s=144s is still beyond 90s timeout, so the exec-signal backstop aborts; totals under 8 fit
 	async function resolve(name, depth) {
+		if (totalResolved >= MAX_RESOLVES) { errors.push("SPF chain truncated at " + MAX_RESOLVES + " total lookups (width limit) — some ip4/ip6 may be missing"); return; }
+		totalResolved++;
 		const url = "https://cloudflare-dns.com/dns-query?name=" + encodeURIComponent(name) + "&type=TXT";
 		let text = "";
 		try {
@@ -2654,6 +2693,10 @@ function cacheEvidence(res) {
 		const low = String(v).toLowerCase();
 		if (h === "cache-control" && /no-store|no-cache|private|max-age=0/.test(low)) continue;
 		if (h === "age" && !/^\d+$/.test(low)) continue;
+		// status headers (x-cache, cf-cache-status, x-vercel-cache, x-cache-status, ...) that say
+		// MISS/DYNAMIC/BYPASS/etc. are NOT cache-hit evidence — a "hit" is only proven by a HIT value
+		// (or a nonzero Age on an uncacheable-looking response is still weak — keep it, it's a hint).
+		if (h !== "age" && /^\s*(miss|dynamic|bypass|uncacheable|updating|stale|expired|not.?cached|noon|dc|bdf?)\b/i.test(low)) continue;
 		ev.push(h + ": " + v);
 	}
 	return ev;
@@ -2875,7 +2918,9 @@ const TOOLS = [
 			const limit = Math.min(Math.max(Number(args.limit ?? 300) || 300, 10), 2000);
 			const out = { domain, urls: [], count: 0, interesting: [], error: "" };
 			try {
-				const cd = `https://web.archive.org/cdx/search/cdx?url=${encodeURIComponent(domain)}/*&output=json&fl=timestamp,original,statuscode,mimetype&collapse=urlkey&limit=${limit}`;
+				// CDX `limit` caps RAW rows; filtering out 3xx/4xx/5xx + images happens client-side,
+				// so request 3x the wanted count (CDX caps ~5000) to actually deliver `limit` clean URLs
+				const cd = `https://web.archive.org/cdx/search/cdx?url=${encodeURIComponent(domain)}/*&output=json&fl=timestamp,original,statuscode,mimetype&collapse=urlkey&limit=${Math.min(limit * 3, 5000)}`;
 				const { res, text } = await fetchText(cd, exec, { budget: 45000 });
 				if (!res.ok) throw new Error(`CDX HTTP ${res.status}`);
 				const rows = JSON.parse(text);
@@ -3122,7 +3167,7 @@ const TOOLS = [
 					])
 					: renderLines("🧬 bb_source_audit", [
 						"no language matched — pass a slug: c, cpp, rust, go, js, ts (e.g. bb_source_audit(language=\"rust\"))",
-						"methodology:" + (v.methodology.length ? "" : "") // keep methodology available
+						"methodology: " + v.methodology.slice(0, 3).map((x) => x.slice(0, 120)).join(" | ")
 					]))
 				: renderLines("🧬 bb_source_audit — source-code audit", [
 					`pass a language slug (c, cpp, rust, go, js, ts) for focused checks, e.g. bb_source_audit(language="rust")`,
@@ -3201,12 +3246,14 @@ const TOOLS = [
 			if (Object.values(s).some((v) => v === null)) {
 				return { ...TRIAGE, count: TRIAGE.rubric.length, filtered: false, score: null, verdict: null, note: "pass pReal/pFeasible/pRepro/pNew (0-1) and impact (0-10) for a computed Rhat verdict" };
 			}
-			// Rhat-style composite: confidence product x novelty x impact
+			// Rhat-style composite: confidence product x novelty x impact.
+			// novelty is the canonical product (NOT 0.6+0.4*pNew): a known/bypassed variant
+			// (pNew=0) must score 0 -> DISCARD, never "INVESTIGATE" (the old floor kept duplicates at 6.0).
 			const confidence = s.pReal * s.pFeasible * s.pRepro;
-			const novelty = 0.6 + 0.4 * s.pNew;
+			const novelty = s.pNew;
 			const score = Math.round(confidence * novelty * s.impact * 10) / 10;
-			const verdict = score >= 7.5 ? "REPORT" : score >= 4 ? "INVESTIGATE" : "DISCARD";
-			return { ...TRIAGE, count: TRIAGE.rubric.length, filtered: false, score, verdict, note: "Rhat = P(real)*P(feasible)*P(repro)*novelty*impact = " + score };
+			const verdict = score >= 2 ? "REPORT" : score >= 0.5 ? "INVESTIGATE" : "DISCARD";
+			return { ...TRIAGE, count: TRIAGE.rubric.length, filtered: false, score, verdict, note: "Rhat = P(real)*P(feasible)*P(repro)*P(new)*impact = " + score + " (REPORT >= 2, INVESTIGATE 0.5-2, DISCARD < 0.5; P(new)=0 forces DISCARD — a known/bypassed variant is not reportable)" };
 		}
 	},
 {
@@ -3330,8 +3377,10 @@ const TOOLS = [
 			const out = { domain: String(args.domain || ""), count: 0, urls: [], note: "" };
 			try {
 				const domain = normalizeDomain(args.domain);
-				const { urls, error } = await cdxUrls(domain, exec, { filterJs: true, cap: Math.min(Math.max(Number(args.limit) || 25, 1), 80) });
+				if (!DOMAIN_RE.test(domain)) throw new Error(`invalid domain: "${domain}" — use a bare hostname like example.com`);
+				const { urls, error } = await cdxUrls(domain, exec, { filterJs: true, cap: clampLimit(args.limit, 25, 1, 80) });
 				if (error && !urls.length) out.note = "CDX error: " + error;
+				let fetchFails = 0;
 				const patterns = [
 					{ name: "aws_key", re: /AKIA[0-9A-Z]{16}/g },
 					{ name: "google_key", re: /AIza[0-9A-Za-z_-]{35}/g },
@@ -3353,9 +3402,16 @@ const TOOLS = [
 						}
 						if (found.length) out.urls.push({ url: u, found });
 					} catch {
-						// individual fetch failure skipped
+						// individual fetch failure — count it so a half-failed run is visible
+						fetchFails++;
 					}
 				});
+				if (fetchFails) {
+					out.note = (out.note ? out.note + "; " : "") + fetchFails + " of " + urls.length + " JS file(s) failed to fetch (network/blocked) — scanned " + out.count + ", results may under-report";
+				} else if (!out.urls.length && out.count) {
+					out.note = (out.note ? out.note + "; " : "") + out.count + " JS file(s) fetched, none matched secret patterns (clean negative)";
+				}
+				if (error) out.note = (out.note ? out.note + "; " : "") + "partial CDX error: " + error;
 				out.urls = out.urls.slice(0, 60);
 			} catch (e) {
 				out.error = shortErr(e);
@@ -3383,7 +3439,8 @@ const TOOLS = [
 					methods: { type: "array", items: { type: "object", properties: { value: { type: "string" }, status: { type: "integer" } }, required: ["value", "status"], additionalProperties: false } },
 					headers: { type: "array", items: { type: "object", properties: { value: { type: "string" }, status: { type: "integer" } }, required: ["value", "status"], additionalProperties: false } },
 					paths: { type: "array", items: { type: "object", properties: { value: { type: "string" }, status: { type: "integer" } }, required: ["value", "status"], additionalProperties: false } },
-					changes: { type: "array", items: { type: "object", properties: { kind: { type: "string" }, value: { type: "string" }, status: { type: "integer" } }, required: ["kind", "value", "status"], additionalProperties: false } }
+					changes: { type: "array", items: { type: "object", properties: { kind: { type: "string" }, value: { type: "string" }, status: { type: "integer" } }, required: ["kind", "value", "status"], additionalProperties: false } },
+					note: { type: "string" }
 				},
 				required: ["url", "baseline", "methods", "headers", "paths", "changes"],
 			},
@@ -3391,12 +3448,13 @@ const TOOLS = [
 				renderLines("bb_403_bypass", [
 					"target: " + v.url + " (baseline " + v.baseline + ")",
 					"changes: " + (v.changes.length ? v.changes.map((c) => c.kind + "=" + c.value + "->" + c.status).join(" | ") : "none"),
-				])
+					v.note ? v.note : ""
+				].filter(Boolean))
 		},
 		timeoutMs: 75000,
 		isConcurrencySafe: () => true,
 		async execute(args, exec) {
-			const out = { url: String(args.url || ""), baseline: 0, methods: [], headers: [], paths: [], changes: [] };
+			const out = { url: String(args.url || ""), baseline: 0, methods: [], headers: [], paths: [], changes: [], note: "" };
 			try {
 				const base = normalizeUrl(args.url);
 				const u = new URL(base);
@@ -3456,11 +3514,12 @@ const TOOLS = [
 					const s = await get(u2.toString());
 					out.paths.push({ value: p, status: s });
 				});
-				const interesting = (s) => s > 0 && s < 500 && s !== out.baseline;
+				const interesting = (s) => s >= 200 && s < 400 && s !== out.baseline; // 2xx/3xx deltas only — 404/405/406/500 are noise, not bypasses
 				for (const m of out.methods) if (interesting(m.status)) out.changes.push({ kind: "method", value: m.value, status: m.status });
 				for (const h of out.headers) if (interesting(h.status)) out.changes.push({ kind: "header", value: h.value, status: h.status });
 				for (const p of out.paths) if (interesting(p.status)) out.changes.push({ kind: "path", value: p.value, status: p.status });
 				out.changes = out.changes.slice(0, 40);
+				if (out.baseline !== 403) out.note = `baseline is HTTP ${out.baseline} (not 403) — battery semantics weakened; treat any 2xx/3xx delta as a lead, not a proven bypass`;
 			} catch (e) {
 				out.error = shortErr(e);
 			}
@@ -3507,6 +3566,7 @@ const TOOLS = [
 			const out = { domain: String(args.domain || ""), spfIps: [], spfIncludes: [], otxHosts: [], probes: [], note: "" };
 			try {
 				const domain = normalizeDomain(args.domain);
+				if (!DOMAIN_RE.test(domain)) throw new Error(`invalid domain: "${domain}" — use a bare hostname like example.com`);
 				const [spf, otx] = await Promise.all([spfTxt(domain, exec), otxUrls(domain, exec, 150)]);
 				out.spfIps = spf.ips.slice(0, 25);
 				out.spfIncludes = spf.includes.slice(0, 12);
@@ -4043,7 +4103,7 @@ const TOOLS = [
 			const out = { domain: String(args.domain || ""), count: 0, fresh: [], oldest: 0, note: "" };
 			try {
 				const domain = normalizeDomain(args.domain);
-				const limit = Math.min(parseInt(args.limit || 30, 10), 100);
+				const limit = clampLimit(args.limit, 30, 1, 100);
 				const url = "https://crt.sh/?q=%25." + encodeURIComponent(domain) + "&output=json";
 				const { text } = await fetchText(url, exec, { budget: 30000, headers: { accept: "application/json" } });
 				const rows = JSON.parse(text || "[]");
@@ -4051,7 +4111,8 @@ const TOOLS = [
 				const seen = new Map();
 				for (const r of rows) {
 					const nb = r.not_before || "";
-					for (const n of String(r.name_value || "").split(/\s+/)) {
+					// crt.sh name_value is newline-separated AND sometimes comma-joined on one line
+					for (const n of String(r.name_value || "").split(/[\s,]+/)) {
 						const name = String(n || "").trim();
 						if (!name || name.startsWith("*")) continue;
 						if (!seen.has(name) || nb > seen.get(name)) seen.set(name, nb);
@@ -4108,7 +4169,7 @@ const TOOLS = [
 			try {
 				const base = normalizeUrl(args.url).replace(/\/$/, "");
 				const probes = [
-					["/readme.html", ""], ["/license.txt", ""], ["/wp-login.php", ""],
+					["/readme.html", "version"], ["/license.txt", ""], ["/wp-login.php", ""],
 					["/wp-login.php?action=register", "registration-open"],
 					["/wp-json/wp/v2/users", "user-enum"],
 					["/?rest_route=/wp/v2/users", "user-enum"],
@@ -4199,7 +4260,7 @@ const TOOLS = [
 			const out = { domain: String(args.domain || ""), scanned: 0, cacheable: [], note: "" };
 			try {
 				const domain = normalizeDomain(args.domain);
-				const limit = Math.min(Math.max(parseInt(args.limit || 20, 10) || 20, 1), 40);
+				const limit = clampLimit(args.limit, 20, 1, 40);
 				const { urls, error } = await cdxUrls(domain, exec, { filterJs: false, cap: 600 });
 				const sensitive = urls
 					.map((u) => {
@@ -4210,15 +4271,17 @@ const TOOLS = [
 				if (error && !sensitive.length) out.note = "CDX error: " + error;
 				const suffixes = ["/style.css", "/main.css", "/main.js", "/test.png?x=1", "/.css", ";.css"];
 				const seen = new Set();
-				await mapPool(sensitive, 6, async (p) => {
+				// budget: worst wall = ceil(20*6/6)*5000 = 100s + CDX ~30s > 120s timeout -> scale fetch budget down
+				const fetchMs = budgetFit(90000, 5000, Math.min(sensitive.length, 20) * suffixes.length, 6) === null ? 4000 : 5000;
+				await mapPool(sensitive.slice(0, Math.min(sensitive.length, 20)), 6, async (p) => {
 					for (const s of suffixes) {
 						const u = "https://" + domain + p + s;
 						if (seen.has(u)) continue;
-						if (out.scanned >= 130) return;
+						if (out.scanned >= 120) return;
 						seen.add(u);
 						out.scanned++;
 						try {
-							const { res } = await fetchRes(u, exec, { budget: 5000 });
+							const { res } = await fetchRes(u, exec, { budget: fetchMs });
 							await readLimited(res, 800);
 							const ev = cacheEvidence(res);
 							if (ev.length) out.cacheable.push({ url: u, status: res.status, evidence: ev.slice(0, 4) });
@@ -4271,7 +4334,7 @@ const TOOLS = [
 			const out = { domain: String(args.domain || ""), total: 0, urls: [], note: "" };
 			try {
 				const domain = normalizeDomain(args.domain);
-				const limit = Math.min(parseInt(args.limit || 40, 10), 100);
+				const limit = clampLimit(args.limit, 40, 1, 100);
 				const [cdx, otx] = await Promise.all([cdxUrls(domain, exec, { cap: 900 }), otxUrls(domain, exec, 200)]);
 				const proneRe = /^(id|cat|catid|category|page|search|q|user|name|file|order|sort|action|lang|folder|type|pid|uid|item|product|news|post|blog|download|view|tid|product_id|category_id)$/i;
 				const dynamicRe = /\.(php|asp|aspx|jsp|cfm|cgi|pl)([?#]|$)/i;
@@ -4504,7 +4567,7 @@ const TOOLS = [
 					["/.git/logs/HEAD", "0000000"],
 					["/.git/refs/heads/main", "hex40"]
 				];
-				await mapPool(probes, 6, async ([p, marker]) => {
+				const results = await mapPool(probes, 6, async ([p, marker]) => {
 					let status = 0;
 					let body = "";
 					try {
@@ -4515,9 +4578,11 @@ const TOOLS = [
 						status = 0;
 					}
 					const hit = status === 200 && marker && (marker === "hex40" ? /^[0-9a-f]{40}$/.test(body.trim()) : body.includes(marker));
-					out.checks.push({ path: p, status, marker: hit ? marker : "" });
-					if (hit) out.findings.push(`${p} readable (200, contains "${marker}") — .git repository exposed`);
+					return { check: { path: p, status, marker: hit ? marker : "" }, finding: hit ? `${p} readable (200, contains "${marker}") — .git repository exposed` : "" };
 				});
+				// mapPool preserves the ORDER of results — push from the ordered array, never inside the callback
+				out.checks.push(...results.map((r) => r.check));
+				for (const r of results) if (r.finding) out.findings.push(r.finding);
 				let listStatus = 0;
 				let listBody = "";
 				try {
@@ -4884,7 +4949,7 @@ const TOOLS = [
 				["/laravel-filemanager", "laravel fm"]
 			];
 			try {
-				await mapPool(PATHS, 4, async ([p, note]) => {
+				const built = await mapPool(PATHS, 4, async ([p, note]) => {
 					let status = 0;
 					let body = "";
 					try {
@@ -4894,11 +4959,14 @@ const TOOLS = [
 					} catch {
 						status = 0;
 					}
-					out.checks.push({ path: p, status, note: status === 200 ? note : "" });
-					if (status === 200 && note && /\.git/.test(p)) out.checks[out.checks.length - 1].note = "git repo — dump with git-dumper";
-					if (status === 200 && /env/.test(p) && /(KEY|SECRET|PASS|TOKEN|DATABASE)/i.test(body)) out.checks[out.checks.length - 1].note = "env file with credential strings(!)";
-					if (status === 200 && /swagger|openapi|api-docs/.test(p)) out.checks[out.checks.length - 1].note = "API spec — mine endpoints with bb_swagger_scan";
+					let noteOut = status === 200 ? note : "";
+					if (status === 200 && note && /\.git/.test(p)) noteOut = "git repo — dump with git-dumper";
+					if (status === 200 && /env/.test(p) && /(KEY|SECRET|PASS|TOKEN|DATABASE)/i.test(body)) noteOut = "env file with credential strings(!)";
+					if (status === 200 && /swagger|openapi|api-docs/.test(p)) noteOut = "API spec — mine endpoints with bb_swagger_scan";
+					// collect + push AFTER the pool (mapPool is order-preserving; out-of-order push races would corrupt per-row notes)
+					return { path: p, status, note: noteOut };
 				});
+				out.checks.push(...built);
 				if (doMaps) {
 					let home = "";
 					try {
@@ -4912,7 +4980,7 @@ const TOOLS = [
 					if (home.includes("asset-manifest.json")) probes.push("/asset-manifest.json");
 					const nextBuild = home.match(/"buildId":"([a-f0-9]+)"/);
 					if (nextBuild) probes.push("/_next/static/" + nextBuild[1] + "/_buildManifest.js.map");
-					await mapPool(probes.slice(0, 8), 3, async (mapPath) => {
+					const mapHits = await mapPool(probes.slice(0, 8), 3, async (mapPath) => {
 						let status = 0;
 						let body = "";
 						try {
@@ -4922,10 +4990,9 @@ const TOOLS = [
 						} catch {
 							status = 0;
 						}
-						if (status === 200 && (body.includes('"version"') || body.includes('"sources"') || body.includes('"mappings"'))) {
-							out.sourcemaps.push(base + mapPath);
-						}
+						return status === 200 && (body.includes('"version"') || body.includes('"sources"') || body.includes('"mappings"')) ? base + mapPath : "";
 					});
+					for (const m of mapHits) if (m) out.sourcemaps.push(m);
 				}
 				const hits = out.checks.filter((c) => c.status === 200);
 				out.summary = out.sourcemaps.length
@@ -4987,10 +5054,12 @@ const TOOLS = [
 				const resSegs = useSibling ? segs.slice(apiIdx + 1) : [];
 				const alreadyVersioned = resSegs.length > 0 && /^(v\d+|beta|alpha|internal|legacy|old|dev|staging|test)$/i.test(resSegs[0]);
 				const resource = (alreadyVersioned ? resSegs.slice(1) : resSegs).join("/");
+				// rebuild from origin+pathname so the query string is never mangled into the version segment
+				const basePath = (pu.origin + pu.pathname).replace(/\/+$/, "");
 				await mapPool(VERS, 6, async (v) => {
 					const probe = useSibling
-						? pu.origin + "/api/" + v + (resource ? "/" + resource : "")
-						: raw.replace(/\/+$/, "") + "/" + v;
+						? pu.origin + "/api/" + v + (resource ? "/" + resource : "") + pu.search
+						: basePath + "/" + v + pu.search;
 					let status = 0;
 					try {
 						const { res } = await fetchRes(probe, exec, { budget: 5000 });
@@ -5006,17 +5075,23 @@ const TOOLS = [
 					let stA = 0;
 					try {
 						const b = withBudget(exec, 8000);
-						const r1 = await fetch(raw, { method: "GET", signal: b.signal, redirect: "manual", headers: { "user-agent": UA, "x-api-version": "1" } });
-						stV = r1.status;
-						b.dispose();
+						try {
+							const r1 = await fetch(raw, { method: "GET", signal: b.signal, redirect: "manual", headers: { "user-agent": UA, "x-api-version": "1" } });
+							stV = r1.status;
+						} finally {
+							b.dispose(); // dispose even when fetch throws
+						}
 					} catch {
 						stV = 0;
 					}
 					try {
 						const b2 = withBudget(exec, 8000);
-						const r2 = await fetch(raw, { method: "GET", signal: b2.signal, redirect: "manual", headers: { "user-agent": UA, "accept": "application/vnd.api.v1+json" } });
-						stA = r2.status;
-						b2.dispose();
+						try {
+							const r2 = await fetch(raw, { method: "GET", signal: b2.signal, redirect: "manual", headers: { "user-agent": UA, "accept": "application/vnd.api.v1+json" } });
+							stA = r2.status;
+						} finally {
+							b2.dispose();
+						}
 					} catch {
 						stA = 0;
 					}
@@ -5139,9 +5214,9 @@ const TOOLS = [
 		timeoutMs: 40000,
 		isConcurrencySafe: () => true,
 		async execute(args, exec) {
-			const host = String(args.host || "").replace(/^https?:\/\//, "").replace(/\/+$/, "");
+			const host = String(args.host || "").trim().replace(/^https?:\/\//, "").split("/")[0].split("?")[0].split("#")[0].replace(/\/+$/, "");
 			const out = { host, results: [], vendors: [], summary: "", error: "" };
-			if (!host) { out.error = "host required"; return out; }
+			if (!host || !/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/i.test(host)) { out.error = "host required — a bare hostname like vpn.example.com (no scheme, no path)"; return out; }
 			const PROBES = [
 				["Cisco ASA/AnyConnect", "/+CSCOE+/logon.html", ["set-cookie: webvpn", "cisco it"]],
 				["Cisco FTD/ASA", "/+webvpn+/index.html", ["set-cookie: webvpn"]],
@@ -5157,29 +5232,37 @@ const TOOLS = [
 				["Barracuda", "/cgi-mod/index.cgi", ["barracuda"]]
 			];
 			try {
-				await mapPool(PROBES, 4, async ([vendor, path, markers]) => {
+				const rows = await mapPool(PROBES, 4, async ([vendor, path, markers]) => {
 					let status = 0;
 					let hdr = "";
 					let body = "";
-					try {
-						const b = withBudget(exec, 8000);
-						const resp = await fetch("https://" + host + path, { method: "GET", signal: b.signal, redirect: "manual", headers: { "user-agent": UA } });
-						status = resp.status;
-						hdr = [...resp.headers.entries()].map(([k, v]) => `${k}: ${v}`).join("\n").toLowerCase();
-						body = await readLimited(resp, 600);
-						b.dispose();
-					} catch {
-						status = 0;
+					// try https first, fall back to http for legacy boxes behind load balancers
+					for (const scheme of ["https", "http"]) {
+						try {
+							const b = withBudget(exec, 8000);
+							try {
+								const resp = await fetch(scheme + "://" + host + path, { method: "GET", signal: b.signal, redirect: "manual", headers: { "user-agent": UA } });
+								status = resp.status;
+								hdr = [...resp.headers.entries()].map(([k, v]) => `${k}: ${v}`).join("\n").toLowerCase();
+								body = await readLimited(resp, 600);
+							} finally {
+								b.dispose(); // dispose even when fetch/read throws
+							}
+							if (status !== 0) break; // a real HTTP answer on https wins; http only when https is unreachable
+						} catch {
+							status = 0;
+						}
 					}
 					const marker = markers.find((mk) => mk && (hdr.includes(mk.toLowerCase()) || body.toLowerCase().includes(mk.toLowerCase()))) || "";
-					out.results.push({ vendor, path, status, marker });
-					if (status === 200 || marker) {
-						if (!out.vendors.includes(vendor)) out.vendors.push(vendor);
-					}
+					// bare 200 with NO vendor marker is NOT a fingerprint — many generic boxes 200 on /remote/login
+					const strong = Boolean(marker) || (status === 200 && body.length > 0 && /login|vpn|gateway|secure access|access gateway/i.test(body));
+					return { vendor, path, status, marker: marker || (status === 200 ? "no vendor marker — weak 200" : ""), strong };
 				});
+				out.results.push(...rows.map(({ vendor, path, status, marker }) => ({ vendor, path, status, marker })));
+				for (const r of rows) if (r.strong && !out.vendors.includes(r.vendor)) out.vendors.push(r.vendor);
 				out.summary = out.vendors.length
 					? `likely ${out.vendors.join(" / ")} — cross-reference CVE matrix (Citrix Bleed CVE-2023-4966, FortiOS CVE-2024-21762/55591, Pulse CVE-2019-11510, ASA CVE-2020-3452, PAN-OS CVE-2024-3400)`
-					: "no known VPN-appliance fingerprint on this host";
+					: "no known VPN-appliance fingerprint on this host (weak 200s with no vendor marker are NOT counted)";
 			} catch (e) {
 				out.error = shortErr(e);
 			}
@@ -5267,7 +5350,17 @@ const TOOLS = [
 				return r;
 			}
 			try {
-				const spfQ = await safe(domain);
+				// base queries are INDEPENDENT — run them concurrently (sequential would sum
+				// 4×4s base + 6×4s DKIM = 40s+ against a 40s timeout; parallel keeps wall <= ~28s)
+				const baseQ = await Promise.all([
+					(async () => ({ key: "spf", q: await safe(domain) }))(),
+					(async () => ({ key: "dmarc", q: await safe("_dmarc." + domain) }))(),
+					(async () => ({ key: "caa", q: await queryCaa(domain) }))(),
+					(async () => ({ key: "mta", q: await safe("_mta-sts." + domain) }))(),
+					(async () => ({ key: "tls", q: await safe("_smtp-tlsrpt." + domain) }))()
+				]);
+				const qmap = Object.fromEntries(baseQ.map(({ key, q }) => [key, q]));
+				const spfQ = qmap.spf;
 				if (spfQ.error) {
 					out.findings.push("SPF lookup FAILED (" + spfQ.error + ") — result unknown, do NOT report spoofable");
 				} else {
@@ -5286,7 +5379,7 @@ const TOOLS = [
 						out.findings.push("NO SPF record — domain spoofable for email");
 					}
 				}
-				const dmarcQ = await safe("_dmarc." + domain);
+				const dmarcQ = qmap.dmarc;
 				if (dmarcQ.error) {
 					out.findings.push("DMARC lookup FAILED (" + dmarcQ.error + ") — result unknown");
 				} else {
@@ -5295,14 +5388,14 @@ const TOOLS = [
 					if (!dmarc) out.findings.push("NO DMARC record — receivers must guess; spoofed mail lands in inbox");
 					else if (/p=none/.test(dmarc)) out.findings.push("DMARC p=none — monitoring only, spoofed mail NOT rejected");
 				}
-				const caaQ = await queryCaa(domain);
+				const caaQ = qmap.caa;
 				if (caaQ.error) {
 					out.findings.push("CAA lookup FAILED (" + caaQ.error + ") — result unknown");
 				} else {
 					out.caa = caaQ.value ? caaQ.value.split(/\s+/).slice(0, 8) : [];
 					if (!out.caa.length) out.findings.push("NO CAA record — any CA may issue certs for the domain (subdomain-takeover-adjacent risk)");
 				}
-				const mtaQ = await safe("_mta-sts." + domain);
+				const mtaQ = qmap.mta;
 				if (mtaQ.error) {
 					out.findings.push("MTA-STS lookup FAILED (" + mtaQ.error + ") — result unknown");
 				} else {
@@ -5310,7 +5403,7 @@ const TOOLS = [
 					if (!mtaQ.value) out.findings.push("NO MTA-STS — no opportunistic TLS enforcement on inbound mail");
 					else out.findings.push("MTA-STS present: " + mtaQ.value.slice(0, 60));
 				}
-				const tlsQ = await safe("_smtp-tlsrpt." + domain);
+				const tlsQ = qmap.tls;
 				if (tlsQ.error) out.findings.push("TLS-RPT lookup FAILED (" + tlsQ.error + ")");
 				else if (tlsQ.value) out.findings.push("TLS-RPT present: " + tlsQ.value.slice(0, 60));
 				for (const sel of ["default", "google", "selector1", "s1", "k1", "dkim"]) {
@@ -5439,6 +5532,7 @@ const TOOLS = [
 					results: { type: "array", items: { type: "object", additionalProperties: false, properties: { header: { type: "string" }, value: { type: "string" }, probe: { type: "string" }, status: { type: "integer" }, body_len: { type: "integer" }, cache_headers: { type: "string" } }, required: ["header", "value", "probe", "status"] } },
 					cache_indicators: { type: "array", items: { type: "string" } },
 					unkeyed: { type: "array", items: { type: "string" } },
+					notes_supplement: { type: "array", items: { type: "string" } },
 					summary: { type: "string" },
 					error: { type: "string" }
 				},
@@ -5456,9 +5550,10 @@ const TOOLS = [
 		timeoutMs: 30000,
 		isConcurrencySafe: () => true,
 		async execute(args, exec) {
-			const target = normalizeUrl(args.url);
-			const out = { url: target, results: [], cache_indicators: [], unkeyed: [], summary: "", error: "" };
+			const out = { url: String(args.url || ""), results: [], cache_indicators: [], unkeyed: [], summary: "", error: "" };
 			try {
+				const target = normalizeUrl(args.url);
+				out.url = target;
 				const HEADERS = Array.isArray(args.headers) && args.headers.length ? args.headers.slice(0, 6) : ["x-forwarded-host", "x-original-url", "x-forwarded-for"];
 				const baseline = await fetchRes(target, exec, { budget: 8000 });
 				const baseText = await readLimited(baseline.res, 2000);
@@ -5553,14 +5648,16 @@ const TOOLS = [
 		timeoutMs: 40000,
 		isConcurrencySafe: () => true,
 		async execute(args, exec) {
-			const target = normalizeUrl(args.url);
-			const out = { url: target, bursts: [], classification: "", evidence: [], summary: "", error: "" };
+			const out = { url: String(args.url || ""), bursts: [], classification: "", evidence: [], summary: "", error: "" };
 			try {
+				const target = normalizeUrl(args.url);
+				out.url = target;
 				const n = Math.max(2, Math.min(15, parseInt(args.bursts, 10) || 10));
 				const ct = args.contentType || "application/json";
 				const body = args.body !== undefined ? args.body : JSON.stringify({ username: "pentest\u0040example.com", password: "wrongpass123" });
-				// budget each request so two full bursts fit inside timeoutMs
-				const perReq = Math.max(2500, Math.min(6000, Math.floor(28000 / (2 * n))));
+				// budget each request so two full bursts fit inside timeoutMs — no fixed floor
+				// (a floor defeats the arithmetic: default n=10 would need 50s vs 40s timeout)
+				const perReq = Math.max(800, Math.floor((40000 * 0.9) / (2 * n)));
 				const statuses = [];
 				for (let round = 1; round <= 2; round++) {
 					const reqs = [];
@@ -5586,6 +5683,7 @@ const TOOLS = [
 					}
 				}
 				const flat = statuses;
+				const timedOut = flat.filter(s => s === 0).length;
 				const hasBlock = flat.some(s => s === 429 || s === 403);
 				const has302 = flat.some(s => s === 302 || s === 301);
 								const b1 = out.bursts[0] ? out.bursts[0].requests : [];
@@ -5595,7 +5693,7 @@ const TOOLS = [
 				if (hasBlock) {
 					const firstBlock = flat.findIndex(s => s === 429 || s === 403) + 1;
 					const kind = flat.includes(429) ? "429 (rate limit)" : "403 (WAF/account-block)";
-					out.classification = "HARD — " + kind + " after " + firstBlock + " request(s) in burst 1";
+					out.classification = "HARD — " + kind + " after " + firstBlock + " request(s) in burst 1" + (timedOut ? " (" + timedOut + " timed out, block still proven by " + kind + ")" : "");
 					out.evidence.push(`first block at request #${firstBlock} (${kind})`);
 					out.evidence.push(flat.slice(0, firstBlock).every(s => s === 401 || s === 400 || s === 422) ? "pre-block responses are credential-rejection statuses, not rate-limit" : "pre-block mix of statuses");
 				} else if (has302) {
@@ -5604,8 +5702,12 @@ const TOOLS = [
 				} else if (lockout) {
 					out.classification = "LOCKOUT — burst 2 fully rejected at 401 with no block code; account may be locked after burst 1";
 					out.evidence.push("burst 2 all 401 after burst 1 all " + [...new Set(out.bursts[0].requests.map(r => r.status))].join("/"));
+				} else if (timedOut > 0) {
+					// a timed-out request is NOT evidence of no limit — it never got a response
+					out.classification = "INCONCLUSIVE — " + timedOut + " of " + flat.length + " requests timed out (budget exhausted/network); absence of 429/403 is NOT proof of no rate limit — re-run with smaller bursts (n=" + n + ") or check connectivity";
+					out.evidence.push("timed-out request indices: " + flat.map((s, i) => (s === 0 ? i + 1 : null)).filter(Boolean).join(", "));
 				} else {
-					out.classification = "NO LIMIT observed — " + flat.length + " identical requests all returned non-blocking statuses (no 429/403/302)";
+					out.classification = "NO LIMIT observed — " + flat.length + " identical requests all returned non-blocking statuses (no 429/403/302, no timeouts)";
 					out.evidence.push("statuses seen: " + [...new Set(flat)].sort().join(", "));
 				}
 				out.summary = "Rate-limit posture: " + out.classification;
@@ -5634,8 +5736,9 @@ const TOOLS = [
 				properties: {
 					url: { type: "string" },
 					results: { type: "array", items: { type: "object", additionalProperties: false, properties: { name: { type: "string" }, payload: { type: "string" }, status: { type: "integer" }, body_len: { type: "integer" }, marker: { type: "array", items: { type: "string" } } }, required: ["name", "payload", "status"] } },
-					signal: { type: "string", enum: ["NONE", "STATUS_CHANGE", "BODY_MARKER", "ERROR"] },
+					signal: { type: "string", enum: ["NONE", "STATUS_CHANGE", "BODY_CHANGE", "BODY_MARKER", "ERROR"] },
 					summary: { type: "string" },
+					errors: { type: "array", items: { type: "string" } },
 					error: { type: "string" }
 				},
 				required: ["url", "results", "signal", "summary"]
@@ -5643,19 +5746,21 @@ const TOOLS = [
 			render: (_args, v) =>
 				renderLines("🍃 bb_nosqli_auth_probe " + v.url, [
 					v.summary,
-					"signal: " + v.signal,
+					"signal: " + v.signal + (v.errors && v.errors.length ? ` (${v.errors.length} probe error(s) — see below)` : ""),
 					...v.results.map(r => `  ${r.name}: ${r.payload} -> HTTP ${r.status} len ${r.body_len}${r.marker.length ? " [marker: " + r.marker.join(",") + "]" : ""}`),
+					...(v.errors || []).map((e) => "  ⚠ " + e),
 					v.error ? "error: " + v.error : ""
 				].filter(Boolean))
 		},
 		timeoutMs: 40000,
 		isConcurrencySafe: () => true,
 		async execute(args, exec) {
-			const target = normalizeUrl(args.url);
-			const uf = args.usernameField || "username";
-			const pf = args.passwordField || "password";
-			const out = { url: target, results: [], signal: "NONE", summary: "", error: "", errors: [] };
+			const out = { url: String(args.url || ""), results: [], signal: "NONE", summary: "", error: "", errors: [] };
 			try {
+				const target = normalizeUrl(args.url);
+				out.url = target;
+				const uf = args.usernameField || "username";
+				const pf = args.passwordField || "password";
 				const mkBody = (u, p) => JSON.stringify({ [uf]: u, [pf]: p });
 				const payloads = [
 					{ name: "baseline", payload: mkBody("pentest_nosql", "wrongpass123") },
@@ -5702,7 +5807,8 @@ const TOOLS = [
 				const markerHit = nonBase.filter(r => newMarkerOf(r).length > 0);
 				if (markerHit.length) { out.signal = "BODY_MARKER"; out.summary = "Markers absent from baseline but present with NoSQL payloads (" + markerHit.map(r => r.name + ": " + newMarkerOf(r).join(",")).join("; ") + ") — verify manually"; }
 				else if (statusChange.length) { out.signal = "STATUS_CHANGE"; out.summary = "Status changes vs baseline for: " + statusChange.map(r => r.name + " -> " + r.status).join(", ") + " — verify manually (could be WAF or a real $ne bypass)"; }
-				else if (bodyChanged.length) { out.signal = "STATUS_CHANGE"; out.summary = "Response grew significantly for " + bodyChanged.map(r => r.name).join(", ") + " (possible operator evaluated) — verify manually"; }
+				else if (bodyChanged.length) { out.signal = "BODY_CHANGE"; out.summary = "Response grew significantly for " + bodyChanged.map(r => r.name).join(", ") + " (possible operator evaluated) — verify manually"; }
+				else if (out.errors.length) { out.signal = "NONE"; out.summary = "No auth-bypass signal on " + target + " BUT " + out.errors.length + "/" + payloads.length + " probes errored (see errors) — partial run, do NOT treat as a clean negative; try $where / $expr JSON variants and URL-encoded bodies"; }
 				else { out.signal = "NONE"; out.summary = "No auth-bypass signal on " + target + " — endpoint either sanitizes operators or rejects with stable 400/401; try $where / $expr JSON variants and URL-encoded bodies"; }
 			} catch (e) {
 				out.error = shortErr(e);
@@ -5839,30 +5945,31 @@ const TOOLS = [
 				]);
 				await mapPool(names, 6, async (name) => {
 					out.checked++;
-					// Azure Blob: ?comp=list returns <EnumerationResults> when public
-					try {
-						const { res } = await fetchRes("https://" + name + ".blob.core.windows.net/?comp=list", exec, { budget: 10000 });
-						const body = await readLimited(res, 800);
-						if (res.status === 200 && /<EnumerationResults/i.test(body) && !out.azure.includes(name)) out.azure.push(name);
-					} catch {
-						// ignore
-					}
-					// GCP Storage: /<bucket>/ returns <ListBucketResult> when public
-					try {
-						const { res } = await fetchRes("https://storage.googleapis.com/" + name + "/", exec, { budget: 10000 });
-						const body = await readLimited(res, 800);
-						if (res.status === 200 && /<ListBucketResult/i.test(body) && !out.gcp.includes(name)) out.gcp.push(name);
-					} catch {
-						// ignore
-					}
-					// Firebase RTDB: {name}.firebaseio.com/.json returns data when rules open
-					try {
-						const { res } = await fetchRes("https://" + name + ".firebaseio.com/.json", exec, { budget: 10000 });
-						const body = await readLimited(res, 400);
-						if (res.status === 200 && /^[\[{]/.test(body.trim()) && !out.firebase.includes(name)) out.firebase.push(name);
-					} catch {
-						// ignore
-					}
+					// all three backends are independent — fire them concurrently; a sequential
+					// 3×10s per name across ceil(25/6) rounds would sum past the 120s timeout
+					await Promise.all([
+						(async () => {
+							try {
+								const { res } = await fetchRes("https://" + name + ".blob.core.windows.net/?comp=list", exec, { budget: 10000 });
+								const body = await readLimited(res, 800);
+								if (res.status === 200 && /<EnumerationResults/i.test(body) && !out.azure.includes(name)) out.azure.push(name);
+							} catch { /* ignore */ }
+						})(),
+						(async () => {
+							try {
+								const { res } = await fetchRes("https://storage.googleapis.com/" + name + "/", exec, { budget: 10000 });
+								const body = await readLimited(res, 800);
+								if (res.status === 200 && /<ListBucketResult/i.test(body) && !out.gcp.includes(name)) out.gcp.push(name);
+							} catch { /* ignore */ }
+						})(),
+						(async () => {
+							try {
+								const { res } = await fetchRes("https://" + name + ".firebaseio.com/.json", exec, { budget: 10000 });
+								const body = await readLimited(res, 400);
+								if (res.status === 200 && /^[\[{]/.test(body.trim()) && !out.firebase.includes(name)) out.firebase.push(name);
+							} catch { /* ignore */ }
+						})()
+					]);
 				});
 				if (!out.azure.length && !out.gcp.length && !out.firebase.length) out.note = "no open storage found on derived names; try bb_wayback_urls for bucket URLs and src-leak for configs.";
 			} catch (e) {
@@ -6039,11 +6146,11 @@ const TOOLS = [
 			const out = { domain: d, checked: 0, dangling: [], note: "" };
 			const TAKEOVER = /(s3[\w.-]*\.amazonaws\.com|blob\.core\.windows\.net|\.cloudfront\.net|herokuapp\.com|\.ghost\.io|\.netlify\.app|\.surge\.sh|\.readme\.io|github\.io|\.fastly\.net|\.zendesk\.com|\.vercel\.app|\.azurewebsites\.net|\.firebaseio\.com|\.myshopify\.com)/i;
 			try {
-				const limit = Math.min(Math.max(parseInt(args.limit || 40, 10) || 40, 1), 80);
+				const limit = clampLimit(args.limit, 40, 1, 40); // >40 subs: 2 DoH fetches each at conc-6 would blow the 150s window
 				const { text } = await fetchText("https://crt.sh/?q=%25." + encodeURIComponent(d) + "&output=json", exec, { budget: 30000, headers: { accept: "application/json" } });
 				let rows;
 				try { rows = JSON.parse(text || "[]"); } catch { rows = []; }
-				const subs = uniq((Array.isArray(rows) ? rows : []).flatMap((r) => String(r.name_value || "").split(/\s+/)).map((s) => String(s).trim().toLowerCase()).filter((s) => s && !s.startsWith("*") && s.endsWith("." + d))).slice(0, limit);
+				const subs = uniq((Array.isArray(rows) ? rows : []).flatMap((r) => String(r.name_value || "").split(/[\s,]+/)).map((s) => String(s).trim().toLowerCase()).filter((s) => s && !s.startsWith("*") && s.endsWith("." + d))).slice(0, limit);
 				await mapPool(subs, 6, async (sub) => {
 					out.checked++;
 					try {
@@ -6116,18 +6223,25 @@ const TOOLS = [
 				const rnd = () => "zz" + Math.random().toString(36).slice(2, 10);
 				const labels = [rnd(), rnd(), rnd()];
 				const ipSets = [];
-				await mapPool(labels, 3, async (lbl) => {
+				// collect ordered results from mapPool — push-inside-callback would jumble label order
+				const rows = await mapPool(labels, 3, async (lbl) => {
 					const fqdn = lbl + "." + d;
-					try {
-						const { text } = await fetchText("https://cloudflare-dns.com/dns-query?name=" + encodeURIComponent(fqdn) + "&type=A", exec, { budget: 8000, headers: { accept: "application/dns-json" } });
-						const j = JSON.parse(text || "{}");
-						const ips = uniq((Array.isArray(j.Answer) ? j.Answer : []).filter((a) => a.type === 1 && typeof a.data === "string").map((a) => a.data));
-						out.labels.push({ label: lbl, ips, status: j.Status || 0 });
-						if (ips.length) ipSets.push(ips.slice().sort().join(","));
-					} catch {
-						out.labels.push({ label: lbl, ips: [], status: 0 });
+					for (const doh of ["cloudflare-dns.com", "1.1.1.1", "dns.google"]) {
+						try {
+							const { text } = await fetchText("https://" + doh + "/dns-query?name=" + encodeURIComponent(fqdn) + "&type=A", exec, { budget: 8000, headers: { accept: "application/dns-json" } });
+							const j = JSON.parse(text || "{}");
+							const ips = uniq((Array.isArray(j.Answer) ? j.Answer : []).filter((a) => a.type === 1 && typeof a.data === "string").map((a) => a.data));
+							return { label: lbl, ips, status: j.Status || 0 };
+						} catch {
+							// next DoH endpoint
+						}
 					}
+					return { label: lbl, ips: [], status: 0 };
 				});
+				for (const r of rows) {
+					out.labels.push({ label: r.label, ips: r.ips, status: r.status });
+					if (r.ips.length) ipSets.push(r.ips.slice().sort().join(","));
+				}
 				const freq = {};
 				for (const s of ipSets) freq[s] = (freq[s] || 0) + 1;
 				const max = Math.max(0, ...Object.values(freq));
@@ -6177,14 +6291,16 @@ const TOOLS = [
 			const d = normalizeDomain(args.domain);
 			const out = { domain: d, harvested: 0, alive: [], note: "" };
 			try {
-				const cap = Math.min(Math.max(parseInt(args.limit || 30, 10) || 30, 1), 60);
+				const cap = clampLimit(args.limit, 30, 1, 60);
 				const { urls, error } = await cdxUrls(d, exec, { cap: cap * 3 });
 				if (error) out.note = "wayback: " + error;
 				const interesting = urls.filter((u) => /(admin|api|backup|upload|console|internal|staging|dev|test|debug|swagger|graphql|\.sql|\.env|download|export|import|config|panel|wp-)/i.test(u)).slice(0, cap);
 				out.harvested = interesting.length;
+				// 60 probes × 8s at conc-6 = 80s + CDX 30s = 110s > 90s timeout -> scale the probe budget
+				const probeMs = budgetFit(50000, 8000, interesting.length, 6) === null ? 5000 : 8000;
 				await mapPool(interesting, 6, async (u) => {
 					try {
-						const { res } = await fetchRes(u, exec, { budget: 8000, redirect: "manual" });
+						const { res } = await fetchRes(u, exec, { budget: probeMs, redirect: "manual" });
 						const body = await readLimited(res, 400);
 						if ((res.status >= 200 && res.status < 300) || res.status === 401 || res.status === 403) out.alive.push({ url: u, status: res.status, size: body.length });
 					} catch {
@@ -6252,10 +6368,16 @@ const TOOLS = [
 				return paths;
 			};
 			try {
-				const candidates = args.specPath ? [String(args.specPath)] : ["/openapi.json", "/openapi.yaml", "/swagger.json", "/swagger.yaml", "/swagger/v1/swagger.json", "/v2/api-docs", "/api-docs", "/api/openapi.json"];
+				// Aggregate deadline: 8 live candidates + CDX + up to 4 archived × 2 fetches each
+				// would otherwise sum to ~274s against a 150s timeoutMs. Bound the whole run so
+				// the tool returns partial results instead of being killed mid-flight.
+				const de = deadlineExec(exec, 140000);
+				const normPath = (s) => { s = String(s || "").trim(); if (!s) return s; return /^https?:\/\//i.test(s) ? s : (s.startsWith("/") ? s : "/" + s); };
+				const urlFor = (p) => (/^https?:\/\//i.test(p) ? p : "https://" + d + p);
+				const candidates = args.specPath ? [normPath(args.specPath)] : ["/openapi.json", "/openapi.yaml", "/swagger.json", "/swagger.yaml", "/swagger/v1/swagger.json", "/v2/api-docs", "/api-docs", "/api/openapi.json"];
 				for (const p of candidates) {
 					try {
-						const { res, text } = await fetchText("https://" + d + p, exec, { budget: 12000 });
+						const { res, text } = await fetchText(urlFor(p), de, { budget: 8000 });
 						if (res.status !== 200) continue;
 						if (/json/.test(res.headers.get("content-type") || "")) {
 							const spec = JSON.parse(text);
@@ -6270,17 +6392,17 @@ const TOOLS = [
 				}
 				// NEWEST archived spec snapshot (availability API) with web/2id_ fallback —
 				// `2015id_` pinned an old snapshot and hid removed/shadow endpoints
-				const { urls } = await cdxUrls(d, exec, { cap: 400 });
+				const { urls } = await cdxUrls(d, de, { cap: 400 });
 				const specUrls = uniq(urls.filter((u) => /(openapi|swagger|api-docs|api\.json|\.ya?ml$)/i.test(u))).slice(0, 4);
 				for (const u of specUrls) {
 					try {
 						let ts = "";
 						try {
-							const av = await fetchText("https://archive.org/wayback/available?url=" + encodeURIComponent(u) + "&timestamp=now", exec, { budget: 12000 });
+							const av = await fetchText("https://archive.org/wayback/available?url=" + encodeURIComponent(u) + "&timestamp=now", de, { budget: 8000 });
 							const aj = JSON.parse(av.text || "{}");
 							ts = (aj.archived_snapshots && aj.archived_snapshots.closest && aj.archived_snapshots.closest.timestamp) || "";
 						} catch { /* keep ts="" -> fallback */ }
-						const { text } = await fetchText("https://web.archive.org/web/" + (ts ? ts + "id_" : "2id_") + "/" + u, exec, { budget: 25000 });
+						const { text } = await fetchText("https://web.archive.org/web/" + (ts ? ts + "id_" : "2id_") + "/" + u, de, { budget: 20000 });
 						const spec = JSON.parse(text);
 						const paths = extract(spec);
 						if (paths.length) { out.archived = { url: u, paths }; break; }
@@ -6356,10 +6478,10 @@ const TOOLS = [
 							}
 						};
 						walk(j);
-						out.scopes = out.scopes.slice(0, Math.min(Math.max(parseInt(args.limit || 30, 10) || 30, 1), 100));
-						// dedupe
+						// dedupe FIRST, then clamp — clamping before dedupe yields fewer than `limit` after dedupe
 						const seen = new Set();
 						out.scopes = out.scopes.filter((s) => (seen.has(s.identifier) ? false : (seen.add(s.identifier), true)));
+						out.scopes = out.scopes.slice(0, clampLimit(args.limit, 30, 1, 100));
 						if (!out.scopes.length) out.note = "policy JSON returned no scope objects; program may be invite-only or handle wrong.";
 					} else {
 						out.note = "no policy JSON (HTTP " + res.status + "); this program may be invite-only, so its scope page is not public.";
@@ -6368,9 +6490,12 @@ const TOOLS = [
 					out.fallback = true;
 					const { text } = await fetchText("https://hackerone.com/programs/search?query=&sort_type=published_at", exec, { budget: 20000 });
 					const NON_PROGRAM = new Set(["hacktivity", "reports", "security", "users", "programs", "settings", "jobs", "about", "careers", "blog", "help", "support", "leaderboard", "bounties", "updates", "search", "signup", "login", "directory", "resources", "community", "har-assets", "analytics", "features", "privacy", "terms", "pricing", "contact", "events", "press", "partners"]);
-					const handles = uniq((text.match(/hackerone\.com\/([a-z0-9_-]+)(?:"|\/)/gi) || []).map((m) => m.replace(/^hackerone\.com\//i, "").replace(/["/]/g, "")).filter((h) => /^[a-zA-Z0-9][a-z0-9_-]{2,}$/.test(h) && !NON_PROGRAM.has(h.toLowerCase()))).slice(0, 40);
-					for (const h of handles.slice(0, 12)) out.scopes.push({ identifier: h, type: "program-handle", eligible: true });
-					out.note = "public index is HTML; extracted " + handles.length + " program handles — pass one to get its real scope JSON.";
+					// match BOTH absolute hrefs (https://hackerone.com/<handle>) and relative hrefs (/<handle>)
+					const raw = (text.match(/(?:hackerone\.com\/|href="\/)([a-zA-Z0-9][a-z0-9_-]{3,})(?:"|\/)/gi) || []).map((m) => m.replace(/^hackerone\.com\//i, "").replace(/^href="\//i, "").replace(/["/]/g, ""));
+					const handles = uniq(raw.filter((h) => /^[a-z0-9][a-z0-9_-]{2,}$/i.test(h) && !NON_PROGRAM.has(h.toLowerCase()) && !/[0-9]{4,}/.test(h))).slice(0, 40);
+					// index handles are NOT verified eligible — they are leads, so eligible:false (must be confirmed via the policy JSON)
+					for (const h of handles.slice(0, clampLimit(args.limit, 12, 1, 40))) out.scopes.push({ identifier: h, type: "program-handle", eligible: false });
+					out.note = "public index is HTML; extracted " + handles.length + " program-handle leads (eligible UNKNOWN — fetch one via handler to confirm scope) — pass one to get its real scope JSON.";
 				}
 			} catch (e) {
 				out.error = shortErr(e);
@@ -6468,14 +6593,16 @@ const TOOLS = [
 					for (const pair of queryPart.split(/[&;]/)) {
 						if (!pair.includes("=")) continue;
 						const [k, v] = pair.split("=", 2);
-						add(unq(k), "url-query", unq(v), validKey(unq(k)) ? "query" : "query");
+						add(unq(k), "url-query", unq(v), "query");
 					}
 				}
 				const pathParts = (pathPart.split("?")[0] || "").split("/");
 				for (let i = 0; i < pathParts.length; i++) {
-					const part = pathParts[i];
+					// URL-decode each segment first — %2F-style encodings otherwise hide IDs
+					const part = unq(pathParts[i]);
 					if (!part) continue;
-					const prevKey = i > 0 && pathParts[i - 1] && /^[a-zA-Z]/.test(pathParts[i - 1]) ? pathParts[i - 1] : "";
+					const prevRaw = i > 0 && pathParts[i - 1] && /^[a-zA-Z]/.test(pathParts[i - 1]) ? pathParts[i - 1] : "";
+					const prevKey = prevRaw ? unq(prevRaw) : "";
 					if (looksLikeId(part, prevKey)) {
 						let key = "id";
 						if (prevKey) key = prevKey.toLowerCase().replace(/s$/, "") + "_id";
@@ -6543,7 +6670,7 @@ const TOOLS = [
 					}
 				};
 				const tryJson = (s) => { try { return JSON.parse(s); } catch { return null; } };
-				const blob = body || (target.indexOf("?") >= 0 ? "" : "");
+				const blob = body || "";
 				if (blob.trim().startsWith("{") || blob.trim().startsWith("[")) {
 					const j = tryJson(blob);
 					if (j) walkJson(j, "");
@@ -6653,7 +6780,7 @@ const TOOLS = [
 	},
 	{
 		name: "bb_idor_swap_probe",
-		description: "Active IDOR/BOLA swap test (idor-tester-ai port): sends the target request as a clean baseline, rebuilds a copy with attacker_id replaced by victim_id (URL and body), resends and scores the pair — status (+30 equal), length ratio (+20), sequence-diff body similarity (+50) — then classifies CONFIRMED (swapped ID echoed, >=6 chars, not true/false/null) / HIGH (sim>=85) / MEDIUM (sim>=50) / BLOCKED (deny keywords, error JSON, 401/403/404) / ERROR (5xx). Pure keyless HTTP — BUT this fires requests at the URL you provide: only run against endpoints you are authorized to test, never against other users' data. Findings are heuristic leads — verify manually before reporting.",
+		description: "Active IDOR/BOLA swap test (idor-tester-ai port): sends the target request as a clean baseline, rebuilds a copy with attacker_id replaced by victim_id (URL and body), resends, then classifies via a decision tree: CONFIRMED (swapped ID echoed in the victim response, >=6 chars, not true/false/null) / HIGH (same status as baseline AND >=85% body similarity — swapped ID likely not enforced) / MEDIUM (same status AND >=50% similarity) / LOW (other same-status outcomes) / BLOCKED (deny keywords, error JSON, 401/403/404) / ERROR (5xx) / EMPTY / OTHER / SKIPPED. Note the similarity tiers require EQUAL status to the baseline. Pure keyless HTTP — BUT this fires requests at the URL you provide: only run against endpoints you are authorized to test, never against other users' data. Findings are heuristic leads — verify manually before reporting.",
 		parameters: {
 			type: "object",
 			additionalProperties: false,
@@ -6697,13 +6824,14 @@ const TOOLS = [
 		timeoutMs: 40000,
 		isConcurrencySafe: () => true,
 		async execute(args, exec) {
-			const url = normalizeUrl(args.url);
 			const attackerId = String(args.attacker_id || "").trim();
 			const victimId = String(args.victim_id || "").trim();
 			const method = (args.method || "GET").toUpperCase();
 			const body = args.body || "";
-			const out = { url, attacker_id: attackerId, victim_id: victimId, swapped: false, baseline: { status: 0, len: 0 }, test: { status: 0, len: 0, similarity: 0, echoed: false, deny: false, error_json: false }, verdict: "SKIPPED", notes: [], analysis: "", error: "" };
+			const out = { url: String(args.url || ""), attacker_id: attackerId, victim_id: victimId, swapped: false, baseline: { status: 0, len: 0 }, test: { status: 0, len: 0, similarity: 0, echoed: false, deny: false, error_json: false }, verdict: "SKIPPED", notes: [], analysis: "", error: "" };
 			try {
+				const url = normalizeUrl(args.url);
+				out.url = url;
 				const STRONG_DENY = ["permission denied", "access denied", "unauthorized", "forbidden", "not allowed", "no access", "no permission", "not permitted", "not authorized", "have_no_permission", "no_permission", "not_allowed", "you do not have permission", "you don't have permission", "insufficient permission", "insufficient privilege"];
 				const WEAK_DENY = ["restricted", "blocked", "invalid", "fail", "cannot", "unable to", "privilege", "denied"];
 				const HTTP_ERR = [400, 401, 402, 403, 404, 405, 406, 408, 409, 410, 422, 429, 500, 501, 502, 503, 504];
@@ -6829,7 +6957,7 @@ const TOOLS = [
 	},
 	{
 		name: "bb_xss_probe",
-		description: "Reflected-XSS quick probe (ACTIVE — authorized targets only): injects a distinctive marker into each query param and reports reflection + echo context (raw / attribute / in-script / encoded) plus a manual-verify flag. Corpus-driven: XSS is the single biggest disclosure class (1,737 of 11,304 reports) and previously had zero dedicated tooling. Keyless: direct HTTP.",
+		description: "Reflected-XSS quick probe (ACTIVE — authorized targets only): injects a distinctive HTML-special-character marker into each query param and reports reflection + echo context (unsafe-raw / in-script / attr-value / HTML-encoded / URL-encoded / stripped) plus a manual-verify flag. The marker embeds <\"'> so HTML-encoding is observable — a plain alphanumeric marker cannot distinguish escaped from raw reflection. Corpus-driven: XSS is the single biggest disclosure class (1,737 of 11,304 reports). Keyless: direct HTTP.",
 		parameters: {
 			type: "object",
 			additionalProperties: false,
@@ -6860,15 +6988,20 @@ const TOOLS = [
 		timeoutMs: 45000,
 		isConcurrencySafe: () => true,
 		async execute(args, exec) {
-			const base = normalizeUrl(args.url);
-			const out = { url: base, results: [], summary: "", error: "" };
+			const out = { url: String(args.url || ""), results: [], summary: "", error: "" };
 			try {
+				const base = normalizeUrl(args.url);
+				out.url = base;
 				const u = new URL(base);
 				const allParams = [...u.searchParams.keys()];
 				if (!allParams.length) { out.summary = "no query params to test — append one, e.g. ?q=test"; return out; }
 				const wanted = args.param ? String(args.param) : "";
 				const params = allParams.filter((k) => !wanted || k === wanted);
-				const MARK = "bbxss7f3a";
+				if (wanted && !params.length) { out.summary = `param "${wanted}" not present in the URL query (params: ${allParams.join(", ")} or none) — nothing tested`; return out; }
+				// marker embeds < \" ' > so raw vs encoded reflection is observable; the
+				// prefix stays alphanumeric for stable matching, the suffix carries the breakouts
+				const MARK = 'bbxss7f3a"><svg/onload=alert(1)>';
+				const ALNUM = "bbxss7f3a";
 				const probeParam = async (p) => {
 					const inj = new URL(u.toString());
 					inj.searchParams.set(p, MARK);
@@ -6883,24 +7016,29 @@ const TOOLS = [
 					} finally {
 						b.dispose();
 					}
-					if (!txt.includes(MARK)) return { param: p, payload: MARK, status, reflected: false, context: "none", note: "marker not reflected — filters/escaping or no reflection" };
-					const raw = txt.includes("<" + MARK);
-					const enc = txt.includes("&lt;" + MARK) || txt.includes("%3C" + MARK);
+					if (status === 0) return { param: p, payload: MARK, status: 0, reflected: false, context: "network-error", note: "fetch failed (network/blocked/timeout) — inconclusive, NOT a clean negative" };
+					if (!txt.includes(ALNUM)) return { param: p, payload: MARK, status, reflected: false, context: "none", note: "marker not reflected — filters/escaping or no reflection" };
+					const raw = txt.includes('bbxss7f3a"><');
+					const htmlEnc = txt.includes("bbxss7f3a&lt;") || txt.includes("bbxss7f3a&quot;");
+					const urlEnc = txt.includes("bbxss7f3a%3C") || txt.includes("bbxss7f3a%22");
 					const attr = new RegExp("(?:src|href|action|data-[a-z]+)=\"[^\"]*bbxss7f3a", "i").test(txt);
 					const scriptCtx = new RegExp("<script[^>]*>[^<]*bbxss7f3a", "i").test(txt);
-					let context = "raw";
-					if (enc && !raw) context = "encoded";
-					else if (attr && !raw) context = "attr-value";
-					if (scriptCtx) context = "in-script";
+					let context = "stripped"; // marker prefix present but specials consumed/encoded elsewhere
 					if (raw) context = "unsafe-raw";
-					const note = status >= 200 && status < 300 && (context === "unsafe-raw" || context === "raw" || context === "in-script") ? "MANUAL VERIFY — likely reflected XSS" : "reflects but context is " + context;
+					else if (scriptCtx) context = "in-script";
+					else if (attr) context = "attr-value";
+					else if (htmlEnc) context = "html-encoded";
+					else if (urlEnc) context = "url-encoded";
+					const risky = status >= 200 && status < 300 && (context === "unsafe-raw" || context === "in-script");
+					const note = risky ? "MANUAL VERIFY — likely reflected XSS (raw/in-script echo on 2xx)" : "reflects but context is " + context;
 					return { param: p, payload: MARK, status, reflected: true, context, note };
 				};
 				out.results = await mapPool(params, 3, (p) => probeParam(p));
 				const hit = out.results.filter((r) => r.reflected);
+				const failed = out.results.filter((r) => r.status === 0);
 				out.summary = hit.length
-					? `${hit.length}/${params.length} param(s) reflect the marker (${hit.map((r) => r.param).join(", ")}) — contexts: ${hit.map((r) => r.context).join(", ")}; raw/in-script echo on 2xx = likely reflected XSS`
-					: `no marker reflection on ${params.length} param(s) — try bb_checklist(category="xss") for DOM/blind variants and postMessage sinks`;
+					? `${hit.length}/${params.length} param(s) reflect the marker (${hit.map((r) => r.param).join(", ")}) — contexts: ${hit.map((r) => r.context).join(", ")}${failed.length ? `; ${failed.length} fetch failed (inconclusive)` : ""}; unsafe-raw/in-script echo on 2xx = likely reflected XSS`
+					: `no marker reflection on ${params.length} param(s)${failed.length ? ` (${failed.length} fetch failed — inconclusive, see results)` : ""} — try bb_checklist(category="xss") for DOM/blind variants and postMessage sinks`;
 			} catch (e) {
 				out.error = shortErr(e);
 			}
@@ -6933,16 +7071,18 @@ const TOOLS = [
 			render: (_args, v) =>
 				renderLines("🌐 bb_ssrf_probe " + v.url, [
 					v.summary,
-					...v.results.filter((r) => r.status !== 0).map((r) => `${r.param} <- ${r.probe}: baseline ${r.baseline_status} vs ${r.status}${r.body_marker ? " [IMDS: " + r.body_marker + "]" : ""}${r.note ? " " + r.note : ""}`),
+					// status 0 = our own probe fetch failed — keep rows WITH a note (fail-while-baseline-worked is signal)
+					...v.results.filter((r) => r.status !== 0 || r.note).map((r) => `${r.param} <- ${r.probe}: baseline ${r.baseline_status} vs ${r.status}${r.body_marker ? " [IMDS: " + r.body_marker + "]" : ""}${r.note ? " " + r.note : ""}`),
 					v.error ? "error: " + v.error : ""
 				].filter(Boolean))
 		},
 		timeoutMs: 60000,
 		isConcurrencySafe: () => true,
 		async execute(args, exec) {
-			const base = normalizeUrl(args.url);
-			const out = { url: base, results: [], summary: "", error: "" };
+			const out = { url: String(args.url || ""), results: [], summary: "", error: "" };
 			try {
+				const base = normalizeUrl(args.url);
+				out.url = base;
 				const u = new URL(base);
 				const allParams = [...u.searchParams.keys()];
 				if (!allParams.length) { out.summary = "no query params to test — the fetch-feeding param must be in the URL"; return out; }
@@ -6954,32 +7094,51 @@ const TOOLS = [
 					["http://169.254.169.254/latest/meta-data/", "aws-imds"],
 					["http://metadata.google.internal/computeMetadata/v1/", "gcp-imds"],
 				];
-				const fetchWith = async (p, val) => {
+				// parallel battery: per param we fire a baseline + 4 targets concurrently; the
+				// sequential double-loop would sum past the 60s timeout (params × 5 × 8s)
+				const de = deadlineExec(exec, 55000);
+				const jobs = [];
+				for (const p of params) {
+					const origVal = u.searchParams.get(p) || "";
+					jobs.push({ p, kind: "baseline", url: origVal || "https://example.com/", baseVal: origVal });
+					for (const [url, kind] of TARGETS) jobs.push({ p, kind, url, baseVal: origVal });
+				}
+				const fetchOne = async (j) => {
 					const inj = new URL(u.toString());
-					inj.searchParams.set(p, val);
-					const b = withBudget(exec, 8000);
+					inj.searchParams.set(j.p, j.url);
+					let status = 0;
+					let txt = "";
+					const b = withBudget(de, 6000);
 					try {
 						const r = await fetch(inj.toString(), { method: "GET", signal: b.signal, redirect: "follow", headers: { "user-agent": UA } });
-						const txt = await readLimited(r, 4000);
-						return { status: r.status, txt };
-					} catch (e) {
-						return { status: 0, txt: (e && e.message) || "" };
+						status = r.status;
+						txt = await readLimited(r, 4000);
+					} catch {
+						status = 0;
 					} finally {
 						b.dispose();
 					}
+					return { p: j.p, kind: j.kind, url: j.url, baseVal: j.baseVal, status, txt };
 				};
-				for (const p of params) {
-					const origVal = u.searchParams.get(p) || "";
-					const baseResp = await fetchWith(p, origVal || "https://example.com/");
-					for (const [url, kind] of TARGETS) {
-						const r = await fetchWith(p, url);
+				const fetched = await mapPool(jobs, 4, fetchOne);
+				// mapPool is order-preserving -> group by param deterministically
+				const byParam = new Map();
+				for (const f of fetched) {
+					if (!byParam.has(f.p)) byParam.set(f.p, []);
+					byParam.get(f.p).push(f);
+				}
+				for (const [p, rows] of byParam) {
+					const baseResp = rows.find((r) => r.kind === "baseline") || { status: 0, txt: "" };
+					for (const r of rows) {
+						if (r.kind === "baseline") continue;
 						const isImds = /ami-id|instance-id|computeMetadata|meta-data|dynamic\/instance/i.test(r.txt);
 						let note = "";
 						if (isImds) note = "IMDS CONTENT RETURNED — cloud metadata readable, critical SSRF";
 						else if (r.status !== 0 && baseResp.status !== 0 && r.status !== baseResp.status) note = "status diff vs baseline (" + baseResp.status + " -> " + r.status + ")";
 						else if (r.status === 0 && baseResp.status !== 0) note = "request failed while baseline worked — possible outbound fetch/connect attempt";
 						else if (r.status !== 0 && baseResp.status !== 0 && Math.abs(r.txt.length - baseResp.txt.length) > 250 && /refused|timed? ?out|no route/i.test(r.txt)) note = "server-side connection error leak (" + r.txt.slice(0, 60) + ")";
-						out.results.push({ param: p, probe: kind + " " + url, status: r.status, baseline_status: baseResp.status, body_marker: isImds ? "imds" : "", note });
+						else if (r.kind === "gcp-imds" && r.status !== 0 && r.txt.length < 50 && baseResp.status !== 0) note = "short/empty 200 — GCP IMDS requires Metadata-Flavor: Google header; empty body still suspicious";
+						out.results.push({ param: p, probe: r.kind + " " + r.url, status: r.status, baseline_status: baseResp.status, body_marker: isImds ? "imds" : "", note });
 					}
 				}
 				const hits = out.results.filter((r) => r.note);
