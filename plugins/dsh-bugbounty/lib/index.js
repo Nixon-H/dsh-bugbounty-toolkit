@@ -127,8 +127,9 @@ function normPorts(raw) {
 	if (raw === undefined) return [80, 443];
 	if (!Array.isArray(raw)) throw new Error("ports must be an array of integers, e.g. [80,443]");
 	const ports = raw.map((p) => {
-		if (!Number.isInteger(p)) throw new Error(`ports must be integers (got ${JSON.stringify(p)})`);
-		return p;
+		const n = typeof p === "string" && p.trim() !== "" ? Number(p) : p;
+		if (!Number.isInteger(n)) throw new Error(`ports must be integers (got ${JSON.stringify(p)})`);
+		return n;
 	});
 	if (ports.length === 0) throw new Error("ports must not be empty");
 	if (ports.length > 8) throw new Error("too many ports (max 8)");
@@ -223,7 +224,8 @@ async function enumSubdomains(domain, exec, cap) {
 		{ name: "crt.sh", run: () => crtSh(domain, exec) },
 		{ name: "hackertarget", run: () => hackerTarget(domain, exec) }
 	];
-	for (const src of attempts) {
+	// run both passive sources in parallel (they are independent) — worst case drops from 75s to ~45s
+	await Promise.all(attempts.map(async (src) => {
 		try {
 			const names = await src.run();
 			if (names.length) {
@@ -233,7 +235,7 @@ async function enumSubdomains(domain, exec, cap) {
 		} catch (e) {
 			errors.push(`${src.name}: ${shortErr(e)}`);
 		}
-	}
+	}));
 	const sorted = [...set].sort();
 	return { subdomains: sorted.slice(0, cap), sources, errors: errors.slice(0, 8) };
 }
@@ -286,7 +288,7 @@ async function securityHeaders(url, exec) {
 		base.headers = headers;
 		base.missing = SECURITY_HEADERS.filter((h) => !headers[h.toLowerCase()]);
 		base.leaks = LEAK_HEADERS.filter((h) => headers[h.toLowerCase()]).map((h) => ({ name: h, value: headers[h.toLowerCase()].slice(0, 120) }));
-		base.cookieFlags = cookieFlags(res, url.startsWith("https://"));
+		base.cookieFlags = cookieFlags(res, (base.finalUrl || url).startsWith("https://"));
 	} catch (e) {
 		base.error = shortErr(e);
 	}
@@ -585,8 +587,9 @@ const CHECKLIST = [
 		"JSONP data-exfil / hijack battery: script-tag cross-origin fetch of an AUTHENTICATED endpoint plus callback execution to exfiltrate data, bypassing server-side privacy gates with NO CORS headers involved (JSONP is CORS-exempt by design) \u2014 find endpoints returning callback-wrapped user data, test the auth-vs-unauth differential as the data-exfil primitive (content differs when authenticated), and check for expired-domain JSONP hijack (attacker serves oauth/_jssdk.html-style JSONP -> JS injection into a page that loads it); distinct from the closure-breakout XSS grammar and script-loader gadgets \u2014 this is data THEFT via the JSONP channel, not script execution on the origin",
 		"SVG attack-surface battery (renderer/image-pipeline contexts): xlink:href external-fetch SSRF inside the image-processing pipeline; local-file-presence oracle via dual image refs (Is-Picture-Present \u2014 one ref to a guessed local file, one to a known-host file, compare doc-image presence) + library-version fingerprinting via doc-image presence; SVG <use> href=data:image/svg+xml nested-SVG gadget (Rails ActionView sanitize); data:image/svg+xml base64 URI accepted as RTE image src (executes on direct open, not in <img>); SMIL <animate attributeName='xlink:href' from='javascript:...' to='&'> animation-based XSS shape; sanitizer comment-breakout closing sequence //[\"'`-->]]>] and parser-context wrappers (<svg><style><h1/> prefix smuggling a stripped tag); served .svg reflecting attacker content = same-origin script execution context",
 		"hidden-DOM header-debug leak battery: debug/error pages that DOM-reflect request headers (including HttpOnly session cookies) into a hidden element \u2014 force the debug dump with a custom header plus an error/404 trigger, confirm with a distinctive custom header echoed into the DOM, and report the HttpOnly-cookie exposure surface (DOM-readable cookie data that bypasses the HttpOnly flag)\"",
+		"Array-indexed multipart stored-XSS sink: multipart/form-data fields named with an ARRAY index (files[0].name / profile[picture] / avatar[path]) \u2014 servers index parts by parse order or numeric key, store the raw value, and re-render it in the file picker listing / profile preview without encoding; test a poisoned array index in a multipart upload whose filename/value is reflected in subsequent HTML (stored XSS with a field-name shape that single-value fuzzers never generate)",
 		],
-		techniques: ["bb_wayback_urls (find params)", "burp collaborator", "XSS hunter", "CSP evaluator", "gau", "gf xss", "Gxss", "kxss", "dalfox", "httpx-toolkit -ct", "stored-XSS grep | nuclei critical,high", "widget macro sub-param", "PAT token minting", "serialized UI-state stored XSS", "sanitizer parser-differential", "JSONP closure-breakout", "template-literal backtick payloads", "path-segment reflection", "CSP host-allowlist attacker-influence audit", "CSP-bypass concrete-gadget battery", "interaction-free event-handler payload grammars", "sink-surface & delivery-differential battery", "javascript:-scheme filter-evasion battery (case/comment/newline, base-href click-XSS, SVG animate, Textile parser)", "CSP nonce/token & script-channel bypass battery (nonce theft/reuse, import data:, srcdoc, githack traversal)", "stored-XSS second-renderer & cross-app data-flow battery (compose re-render, widget embed, cross-tenant)", "attribute-level & event-delegation injection battery (class-name delegation, onbeforescriptexecute, cookie-name)", "CDN-edge reflection & ARL origin-selection inflection (Akamai ARL path-prefix /7/0/33/1d/, goarl/akamai-arl-hack)", "SVG <use>/xlink:href external-resource sanitizer-gadget battery (data: nested-SVG, allowlist survival, image-pipeline SSRF)", "JSONP data-exfil/hijack battery (script-tag authenticated-endpoint fetch, no-CORS privacy-gate bypass, expired-domain JSONP hijack)", "SVG attack-surface battery (xlink:href pipeline SSRF + Is-Picture-Present file-presence oracle, <use> nested-SVG gadget, data: RTE src, SMIL animate XSS, comment-breakout sequence, parser-context wrappers, .svg same-origin render context)", "hidden-DOM header-debug leak battery (debug/error page DOM-reflecting request headers incl. HttpOnly cookies; distinctive-header confirmation)"]
+		techniques: ["bb_wayback_urls (find params)", "burp collaborator", "XSS hunter", "CSP evaluator", "gau", "gf xss", "Gxss", "kxss", "dalfox", "httpx-toolkit -ct", "stored-XSS grep | nuclei critical,high", "widget macro sub-param", "PAT token minting", "serialized UI-state stored XSS", "sanitizer parser-differential", "JSONP closure-breakout", "template-literal backtick payloads", "path-segment reflection", "CSP host-allowlist attacker-influence audit", "CSP-bypass concrete-gadget battery", "interaction-free event-handler payload grammars", "sink-surface & delivery-differential battery", "javascript:-scheme filter-evasion battery (case/comment/newline, base-href click-XSS, SVG animate, Textile parser)", "CSP nonce/token & script-channel bypass battery (nonce theft/reuse, import data:, srcdoc, githack traversal)", "stored-XSS second-renderer & cross-app data-flow battery (compose re-render, widget embed, cross-tenant)", "attribute-level & event-delegation injection battery (class-name delegation, onbeforescriptexecute, cookie-name)", "CDN-edge reflection & ARL origin-selection inflection (Akamai ARL path-prefix /7/0/33/1d/, goarl/akamai-arl-hack)", "SVG <use>/xlink:href external-resource sanitizer-gadget battery (data: nested-SVG, allowlist survival, image-pipeline SSRF)", "JSONP data-exfil/hijack battery (script-tag authenticated-endpoint fetch, no-CORS privacy-gate bypass, expired-domain JSONP hijack)", "SVG attack-surface battery (xlink:href pipeline SSRF + Is-Picture-Present file-presence oracle, <use> nested-SVG gadget, data: RTE src, SMIL animate XSS, comment-breakout sequence, parser-context wrappers, .svg same-origin render context)", "hidden-DOM header-debug leak battery (debug/error page DOM-reflecting request headers incl. HttpOnly cookies; distinctive-header confirmation)", "array-indexed multipart stored-XSS sink (files[0].name / profile[picture] indexed-part upload re-rendered in file picker)"]
 	},
 	{
 		slug: "css-injection",
@@ -1135,7 +1138,7 @@ const CHECKLIST = [
 		name: "Fix-bypass & patch-regression retesting",
 		description: "Hunting incomplete vendor/audit fixes (167 pool records; the corpus's most repeated meta-theme): replay the ORIGINAL PoC plus encoding mutations against claimed-patched builds and treat 'fixed' as a hypothesis; re-test every path, sibling code path, duplicate and per-enum value of the sink; verify the DEPLOYED artifact (fixes that only regenerate artifacts leave live hosts vulnerable); and run a mitigation-review pass auditing every fix for NEW exploitability while mining vendor fix PRs for adjacent bugs.",
 		checks: ["Patch-differential regression battery: replay the ORIGINAL PoC plus encoding mutations (case/encoding/unicode/param-order variants) against the claimed-patched build \u2014 'fixed' is a hypothesis, not a conclusion; retest disclosures marked 'resolved' with the same endpoint+payload pair (unpatched fixes are the common case), and revalidate previously-fixed findings after redesigns", "Sibling-path & scope-completeness battery: a fix covering one path leaves sibling paths live \u2014 re-test ALL paths, sibling code paths (scoped-label variant uses a different helper), adjacent params and per-enum-value variants of the same sink (breakdown=affiliates patched, breakdown=history still vulnerable on the same endpoint)", "Deployed-artifact verification: fixes that apply only to regenerated artifacts (build output, images, templates, generated bundles) leave deployed instances vulnerable \u2014 check the SHIPPED artifact on the live host, not the repo; capture the patched state as a second finding when an appliance updates mid-test", "Mitigation-review / fix-regression audit: audit every fix for NEW exploitability (new FSM semantics, new require/revert from the fix = DoS candidate, modulo/duration math vs cycle length, compensation sources); retest EVERY duplicate of each finding \u2014 fixes can leave dupes alive; mine vendor fix PRs for the vulnerable sink and stray adjacent bugs; re-inject the same parser confusion into an adjacent surface after a vendor fix"],
-		techniques: ["patch-differential retest ('fixed' = hypothesis)", "sibling-path/per-enum fix regression", "deployed-artifact verification", "mitigation-review + fix-PR mining"],
+		techniques: ["patch-differential retest ('fixed' = hypothesis)", "sibling-path/per-enum fix regression", "deployed-artifact verification", "mitigation-review + fix-PR mining", "incomplete-patch / post-fix re-review (new encoding, adjacent param, sibling endpoint variants of the same sink after a vendor fix)"],
 	},
 	{
 		slug: "windows-lpe",
@@ -2132,7 +2135,7 @@ const CHECKLIST = [
 		"Rewards/cycle-accounting battery: _notifyReward checkpoint ordering overwrites lastUpdateTime (rewards lost depending on deposit order), cycle-sync fairness (late-sync steals from honest users), dust-deposit + getReward re-notification dilution, gauge-deprecation registry desync, emissions-schedule dilution, protocol-fee double-use",
 		"Silent-failure / early-return + try/catch gas-swallowing battery: return-vs-revert on fund movement (early return sticks funds), 1/64 gas-retention rule (outer try/catch catches the inner call's reverted state), empty-revert-data bypassing catch blocks, unspent UniV3 refunds ignored",
 		"Oracle-callback lifecycle battery: VRF request-lifecycle fairness (underfunded -> delayed -> frontrun rigged draw), fulfillRandomWords must never revert (bricked randomness), callbackGasLimit exhaustion, accumulator reset between request and fulfill, same-block request+fulfill re-roll window",
-		"Hash-domain/dedup fragility battery: ballot/order digest includes mutable fields -> duplicate resubmission, keccak domain separation (same struct hashed in different contexts), timelock scheduling-hash must include eta, EIP-1052 codehash semantics (selfdestruct changes codehash), 4-byte selector collisions",
+		"Hash-domain/dedup fragility battery: ballot/order digest includes mutable fields -> duplicate resubmission, keccak domain separation (same struct hashed in different contexts), timelock scheduling-hash must include eta, EIP-1052 codehash semantics (selfdestruct changes codehash), 4-byte selector collisions; EIP-2718 typed-transaction/receipt encoding \u2014 a system that parses legacy vs type-2 typed envelopes (EIP-1559 dynamic-fee, EIP-4844 blobs) by fixed offsets, or reads tx.type / receipt status from the WRONG envelope shape, mis-decodes proofs, deposit/withdrawal records and replay-guards across fork-era tx forms (same logical tx encoded two ways = duplicate processing or missed dedup)",
 		"Auction state-machine battery (brick-ability + griefing + MEV): single-instance/no-removal/monotonic-lot invariants (auction must not be brick-able by a bidder, lot must be monotonic, no removal or withdrawal-lock on settled lots), last-block sniping of fixed endBlock auctions + pause front-running + bid-withdrawal liquidity lock, fake-bid kick -> end.skip/pack/cash drain (kick anyone's fake bid then drain the settle), MEV sandwich of liquidation challenge auctions (frontrun repay + adjustPrice + backrun 1-wei bid to steal collateral), concurrent-auction shortfall diversion and isLastCollateral checks, address(0) recipient at auction start -> non-liquidatable vault, collateral-bundle mutability mid-auction (permissionless deposits into the vaultID manipulate the bid), flashloan transient supply passing the health check then withdrawing, weird-ERC20 refund DoS -> pull-over-push payout",
 		"Upgradeable/inheritance battery: base drift (extension inherits the Core contract instead of the full asset - missing functions, storage and access control), missing __X_init chain (__Governor_init/__EIP712_init/__ERC721_init omitted -> uninitialized inherited state), initializer vs onlyInitializing modifier usage, storage-gap __gap[50] collisions across the inheritance chain, re-callable initialize (double-init reconfigures the contract), EIP-1822/EIP-1967 proxy conformance (implementation slot, admin slot, constructor-vs-initializer), msg.value not forwarded through delegatecall (value lost in proxy calls)",
 		"Pause/circuit-breaker coverage sweep: inherited-but-unwired Pausable (pause() exists but whenNotPaused never gates fund movement -> dead control), whenNotPaused missing on fund-moving/queue-processing functions, pause must NOT gate liquidations (paused market blocks liquidators -> bad debt accrues), pause must NOT lock user funds (claim/collect/withdraw still callable), pause + renouncePauser brick (irreversible DoS), role renunciation finality (renounced roles can't be re-granted -> permanent brick), pause-freeze rug (owner pauses then drains)",
@@ -2536,26 +2539,42 @@ async function otxUrls(domain, exec, cap = 250) {
 }
 // SPF TXT via DNS-over-HTTPS (Cloudflare): { ips: [], includes: [], error }
 async function spfTxt(domain, exec) {
-	const url = "https://cloudflare-dns.com/dns-query?name=" + encodeURIComponent(domain) + "&type=TXT";
-	try {
-		const { text } = await fetchText(url, exec, { budget: 12000, headers: { accept: "application/dns-json" } });
-		const data = JSON.parse(text || "{}");
+	// resolves the SPF include chain recursively (depth <= 3) so origin-IP hunting
+	// sees the full ip4/ip6 set even when the apex record only says include:thirdparty
+	const seenIncludes = new Set();
+	const allIps = new Set();
+	const includes = [];
+	let errors = [];
+	async function resolve(name, depth) {
+		const url = "https://cloudflare-dns.com/dns-query?name=" + encodeURIComponent(name) + "&type=TXT";
+		let text = "";
+		try {
+			const r = await fetchText(url, exec, { budget: 12000, headers: { accept: "application/dns-json" } });
+			text = r.text || "";
+		} catch (e) {
+			errors.push(name + ": " + shortErr(e));
+			return;
+		}
+		let data = {};
+		try { data = JSON.parse(text || "{}"); } catch { /* non-JSON DoH reply */ }
 		const txts = (data.Answer || [])
 			.filter((a) => a.type === 16 && typeof a.data === "string")
 			.map((a) => a.data.replace(/"/g, ""));
 		const spf = txts.find((t) => /^v=spf1/i.test(t)) || "";
-		const ips = spf
-			.split(/\s+/)
-			.filter((t) => /^(ip4|ip6):/.test(t))
-			.map((t) => t.replace(/^ip[46]:/, ""));
-		const includes = spf
-			.split(/\s+/)
-			.filter((t) => /^include:/.test(t))
-			.map((t) => t.split(":")[1]);
-		return { ips, includes, txts: txts.slice(0, 5), error: null };
-	} catch (e) {
-		return { ips: [], includes: [], txts: [], error: shortErr(e) };
+		for (const t of spf.split(/\s+/)) {
+			if (/^(ip4|ip6):/.test(t)) allIps.add(t.replace(/^ip[46]:/, ""));
+			else if (/^include:/.test(t)) {
+				const inc = t.split(":")[1];
+				if (inc && !seenIncludes.has(inc) && depth < 3) {
+					seenIncludes.add(inc);
+					includes.push(inc);
+					await resolve(inc, depth + 1);
+				}
+			}
+		}
 	}
+	await resolve(domain, 0);
+	return { ips: [...allIps], includes: includes.slice(0, 25), txts: [], error: errors.length ? errors.join("; ") : null };
 }
 function hashText(s) {
 	let h = 5381;
@@ -2723,9 +2742,14 @@ const TOOLS = [
 			host = host.toLowerCase().replace(/\/+$/, "");
 			if (!host) throw new Error("host is required");
 			if (host.length > 253 || /\s/.test(host)) throw new Error(`invalid host: "${host.slice(0, 60)}"`);
+			// host:port embedded in the host string (e.g. example.com:8080) — extract and merge into ports
+			let hostPort = null;
+			const hm = host.match(/^(.*?):(\d{1,5})$/);
+			if (hm) { host = hm[1]; hostPort = Number(hm[2]); }
 			const ports = normPorts(args.ports);
+			const finalPorts = hostPort !== null ? uniq([hostPort, ...ports]) : ports;
 			const attempts = [];
-			for (const port of ports) {
+			for (const port of finalPorts) {
 				const schemes = (port === 443 || port === 8443) ? ["https", "http"] : ["http", "https"];
 				for (const scheme of schemes) attempts.push({ scheme, port });
 			}
@@ -2863,11 +2887,11 @@ const TOOLS = [
 					if (/^(image|font|audio|video)/.test(mime)) continue;
 					if (!original || seen.has(original)) continue;
 					seen.add(original);
-					urls.push(original);
 					const reason = interestingReason(original);
 					if (reason && interesting.length < 200) interesting.push({ url: original, reason: mime ? reason + " (" + mime + ")" : reason });
+					if (urls.length < limit) urls.push(original);
 				}
-				out.urls = urls.slice(0, limit);
+				out.urls = urls;
 				out.count = urls.length;
 				out.interesting = interesting;
 			} catch (e) {
@@ -2924,7 +2948,7 @@ const TOOLS = [
 				return renderLines(`🎯 bb_recon ${v.domain}`, lines);
 			}
 		},
-		timeoutMs: 120000,
+		timeoutMs: 240000,
 		isConcurrencySafe: () => true,
 		async execute(args, exec) {
 			const domain = normalizeDomain(String(args.domain ?? ""));
@@ -2945,7 +2969,7 @@ const TOOLS = [
 					for (const port of [80, 443]) attempts.push({ host, scheme, port });
 				}
 			}
-			const probeResults = await mapPool(attempts, 8, (a) => probeOnce(a.host, a.scheme, a.port, exec));
+			const probeResults = await mapPool(attempts, 12, (a) => probeOnce(a.host, a.scheme, a.port, exec));
 			const byHost = new Map();
 			for (let i = 0; i < attempts.length; i++) {
 				const a = attempts[i];
@@ -2966,12 +2990,12 @@ const TOOLS = [
 			}
 			liveHosts.sort((a, b) => a.host.length - b.host.length || a.host.localeCompare(b.host));
 			const techJobs = liveHosts.slice(0, 10).map((h) => ({ host: h.host, url: h.url }));
-			const techResults = await mapPool(techJobs, 4, async ({ host, url }) => {
+			const techResults = await mapPool(techJobs, 8, async ({ host, url }) => {
 				const t = await techDetect(url, exec);
 				return { host, tech: t.tech.map((x) => x.name), error: t.error };
 			});
 			const headJobs = liveHosts.slice(0, 6).map((h) => ({ host: h.host, url: h.url }));
-			const headResults = await mapPool(headJobs, 4, async ({ host, url }) => {
+			const headResults = await mapPool(headJobs, 8, async ({ host, url }) => {
 				const s = await securityHeaders(url, exec);
 				return { host, s };
 			});
@@ -3029,7 +3053,9 @@ const TOOLS = [
 				},
 				required: ["categories", "count", "filtered"]
 			},
-			render: (_args, v) => v.filtered
+			render: (_args, v) => v.filtered && !v.categories.length
+				? renderLines("📋 bb_checklist", ["no category matches — pass a slug or name from the index, e.g. bb_checklist(category=\"ssrf\")"])
+				: v.filtered
 				? renderLines("📋 bb_checklist", v.categories.flatMap((c) => [
 					`\n## ${c.name} (${c.slug})`,
 					c.description,
@@ -3052,7 +3078,7 @@ const TOOLS = [
 	},
 	{
 		name: "bb_source_audit",
-		description: "Source-code audit methodology (segregated from web bug bounty): 7-step audit flow, bug-class priority order, and per-language checklists + grep patterns for C/C++, Rust, Go, JS/TS. Optional language filter returns just that language's focused checks.",
+		description: "Source-code audit methodology (segregated from web bug bounty): 7-step audit flow, bug-class priority order, and per-language checklists + grep patterns. Optional language filter (c-cpp, rust, go, js-ts; substring match) returns just that language's focused checks.",
 		parameters: {
 			type: "object",
 			additionalProperties: false,
@@ -3083,12 +3109,17 @@ const TOOLS = [
 				required: ["methodology", "priority", "languages", "count", "filtered"]
 			},
 			render: (_args, v) => v.filtered
-				? renderLines("🧬 bb_source_audit", [
-					`focus: ${v.languages[0].name} (${v.languages[0].slug})`,
-					`  checks:`,
-					...v.languages[0].checks.map((x) => `    - ${x}`),
-					`  grep patterns: ${v.languages[0].grep.join(" | ")}`
-				])
+				? (v.languages.length
+					? renderLines("🧬 bb_source_audit", [
+						`focus: ${v.languages[0].name} (${v.languages[0].slug})`,
+						`  checks:`,
+						...v.languages[0].checks.map((x) => `    - ${x}`),
+						`  grep patterns: ${v.languages[0].grep.join(" | ")}`
+					])
+					: renderLines("🧬 bb_source_audit", [
+						"no language matched — pass a slug: c, cpp, rust, go, js, ts (e.g. bb_source_audit(language=\"rust\"))",
+						"methodology:" + (v.methodology.length ? "" : "") // keep methodology available
+					]))
 				: renderLines("🧬 bb_source_audit — source-code audit", [
 					`pass a language slug (c, cpp, rust, go, js, ts) for focused checks, e.g. bb_source_audit(language="rust")`,
 					`methodology:`,
@@ -3111,7 +3142,7 @@ const TOOLS = [
 	},
 	{
 		name: "bb_triage",
-		description: "Rhat-scored bug triage & campaign workflow (merged from the bughunt obsidian bug-report template + FINDINGS/SOL lessons): score a candidate with P(real_bug)/P(feasible)/P(reproducible)/P(new_root_cause)/expected_impact -> REPORT / INVESTIGATE / DISCARD verdict, status-tracking flow, finding classes (separating genuine bugs from design opinions), SQLite concurrency audit checklist, and the report template fields.",
+		description: "Rhat-style composite-scored bug triage & campaign workflow (merged from the bughunt obsidian bug-report template + FINDINGS/SOL lessons): score a candidate with P(real_bug)/P(feasible)/P(reproducible)/P(new_root_cause)/expected_impact -> REPORT / INVESTIGATE / DISCARD verdict, status-tracking flow, finding classes (separating genuine bugs from design opinions), SQLite concurrency audit checklist, and the report template fields.",
 		parameters: {
 			type: "object",
 			additionalProperties: false,
@@ -3134,8 +3165,8 @@ const TOOLS = [
 					finding_classes: { type: "array", items: { type: "string" } },
 					sqlite_audit: { type: "array", items: { type: "string" } },
 					report_template: { type: "array", items: { type: "string" } },
-					score: { type: "number" },
-					verdict: { type: "string" },
+					score: { type: ["number", "null"] },
+					verdict: { type: ["string", "null"] },
 					note: { type: "string" },
 					count: { type: "integer" },
 					filtered: { type: "boolean" }
@@ -3260,7 +3291,7 @@ const TOOLS = [
 	},
 	{
 		name: "bb_js_secrets",
-		description: "Harvest a domain's JS files from Wayback CDX and scan for secrets/keys (AWS, Google, JWTs, api_key, token, password, secret). Keyless: CDX + direct HTTP.",
+		description: "Mine a domain's JS file URLs from Wayback CDX, then fetch + scan the live bundles for secrets/keys (AWS, Google, JWTs, api_key, token, password, secret). Keyless: CDX + direct HTTP.",
 		parameters: {
 			type: "object",
 			additionalProperties: false,
@@ -3289,7 +3320,7 @@ const TOOLS = [
 					v.note ? "note: " + v.note : "",
 				])
 		},
-		timeoutMs: 60000,
+		timeoutMs: 180000,
 		isConcurrencySafe: () => true,
 		async execute(args, exec) {
 			const out = { domain: String(args.domain || ""), count: 0, urls: [], note: "" };
@@ -3303,7 +3334,7 @@ const TOOLS = [
 					{ name: "jwt", re: /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g },
 					{ name: "generic_key", re: /\b(api[_-]?key|api_key|secret|token|password|passwd|pwd|client_secret|private_key)\b\s*[:=]\s*["'][^"']{8,}["']/gi },
 				];
-				await mapPool(urls, 4, async (u) => {
+				await mapPool(urls, 8, async (u) => {
 					try {
 						const { res } = await fetchRes(u, exec, { budget: 10000 });
 						const txt = await readLimited(res, 500_000);
@@ -3358,7 +3389,7 @@ const TOOLS = [
 					"changes: " + (v.changes.length ? v.changes.map((c) => c.kind + "=" + c.value + "->" + c.status).join(" | ") : "none"),
 				])
 		},
-		timeoutMs: 60000,
+		timeoutMs: 75000,
 		isConcurrencySafe: () => true,
 		async execute(args, exec) {
 			const out = { url: String(args.url || ""), baseline: 0, methods: [], headers: [], paths: [], changes: [] };
@@ -3434,7 +3465,7 @@ const TOOLS = [
 	},
 	{
 		name: "bb_origin_ip",
-		description: "Origin IP recon behind a WAF: SPF TXT chain (ip4/ip6/include via DoH), OTX-hostname cross-check, optional direct-IP title probing. Keyless: DoH + OTX + direct HTTP.",
+		description: "Origin IP recon behind a WAF: SPF TXT chain (ip4/ip6/include via DoH), OTX-hostname cross-check, direct-IP title probing of discovered SPF hosts. Keyless: DoH + OTX + direct HTTP.",
 		parameters: {
 			type: "object",
 			additionalProperties: false,
@@ -3466,16 +3497,15 @@ const TOOLS = [
 					v.note ? "note: " + v.note : "",
 				])
 		},
-		timeoutMs: 45000,
+		timeoutMs: 90000,
 		isConcurrencySafe: () => true,
 		async execute(args, exec) {
 			const out = { domain: String(args.domain || ""), spfIps: [], spfIncludes: [], otxHosts: [], probes: [], note: "" };
 			try {
 				const domain = normalizeDomain(args.domain);
-				const spf = await spfTxt(domain, exec);
+				const [spf, otx] = await Promise.all([spfTxt(domain, exec), otxUrls(domain, exec, 150)]);
 				out.spfIps = spf.ips.slice(0, 25);
 				out.spfIncludes = spf.includes.slice(0, 12);
-				const otx = await otxUrls(domain, exec, 150);
 				out.otxHosts = otx.hosts.slice(0, 30);
 				if (spf.error) out.note = "SPF error: " + spf.error;
 				if (otx.error) out.note += (out.note ? "; OTX error: " : "OTX error: ") + otx.error;
@@ -3555,11 +3585,13 @@ const TOOLS = [
 					seen.add(v.url);
 					out.count++;
 					try {
-						const { res } = await fetchRes(v.url, exec, { budget: 6000 });
+						const { res } = await fetchRes(v.url, exec, { budget: 6000, redirect: "manual" });
 						await readLimited(res, 400);
 						const injected = [];
 						for (const sc of safeCookies(res)) if (/crlf=|coffinxp/i.test(sc)) injected.push("Set-Cookie: " + sc.split(";")[0]);
 						if (res.headers.get("x-injected")) injected.push("X-Injected: " + res.headers.get("x-injected"));
+						const loc = res.headers.get("location") || "";
+						if (/crlf=|coffinxp/i.test(loc)) injected.push("Location: " + loc.slice(0, 80));
 						if (injected.length) out.found.push({ where: v.where, payload: v.payload, header: injected.join(" | "), status: res.status });
 					} catch {
 						// skipped
@@ -3619,8 +3651,10 @@ const TOOLS = [
 						const { res } = await fetchRes("https://" + domain + p, exec, { budget: 10000 });
 						const body = await readLimited(res, 6000);
 						const ctype = res.headers.get("content-type") || "";
+						// cross-check: 2xx AND real spec body (not a catch-all HTML page) AND json/yaml content-type
 						const specish = res.status >= 200 && res.status < 300 &&
-							(/(swagger|openapi|"paths"|definitions|"components"|"swagger":\s*"2\.0")/i.test(body) || /(json|ya?ml)/i.test(ctype));
+							!/<\s*html/i.test(body) &&
+							/(swagger|openapi|"paths"|definitions|"components"|"swagger":\s*"2\.0")/i.test(body) && /(json|ya?ml)/i.test(ctype);
 						out.endpoints.push({ path: p, status: res.status, ctype, size: body.length, spec: specish });
 					} catch {
 						out.endpoints.push({ path: p, status: 0, ctype: "", size: 0, spec: false });
@@ -3663,12 +3697,13 @@ const TOOLS = [
 					...v.buckets.filter((b) => b.listable || b.status !== 404).map((b) => b.name + " -> " + b.status + (b.listable ? " (LISTABLE)" : "")),
 				])
 		},
-		timeoutMs: 60000,
+		timeoutMs: 75000,
 		isConcurrencySafe: () => true,
 		async execute(args, exec) {
 			const out = { domain: String(args.domain || ""), buckets: [], open: [] };
 			try {
 				const d = normalizeDomain(args.domain);
+				if (!d) { out.note = "domain required — e.g. example.com"; return out; }
 				const stem = d.split(".")[0];
 				const names = [
 					d, d + "-backup", d + "-bak", d + "-assets", d + "-static", d + "-data", d + "-uploads",
@@ -3688,7 +3723,8 @@ const TOOLS = [
 							const note = res.status === 404 ? (body.includes("NoSuchBucket") ? "nonexistent" : "404") : body.includes("AccessDenied") ? "exists-private" : "exists";
 							if (merged) {
 								if (listable) merged.listable = true;
-								if (note && merged.note !== "nonexistent") merged.note = merged.note || note;
+								if (merged.note === "nonexistent" && note && note !== "nonexistent") { merged.note = note; merged.status = res.status; }
+								else if (note && !merged.note) merged.note = note;
 							} else {
 								merged = { name, status: res.status, listable, note };
 							}
@@ -3872,7 +3908,7 @@ const TOOLS = [
 				const L = l.charAt(0).toUpperCase() + l.slice(1);
 				const base = [
 					email, L + "@" + d, l.toUpperCase() + "@" + d,
-					l + "+tag@example.com", l + "+test@" + d,
+					l + "+tag@" + d, l + "+test@" + d,
 					l.split("").join(".") + "@" + d, (l.split("").join(".") + "@gmail.com").replace(/\.{2,}/g, "."),
 					'"' + l + ' " "@' + d, "\"" + l + " name\"@" + d,
 					l + "%00@evil.com", l + "%0d%0a@evil.com", l + "\r\n@evil.com",
@@ -3952,6 +3988,8 @@ const TOOLS = [
 					out.verdict = "200 with header returns DIFFERENT content than 200 baseline — possible middleware-bypass serving protected content; verify the header-probe page shows admin-only data (common 200-vs-200 variant)";
 				} else if (b.status === 200 && b.status !== t.status && t.status !== 200) {
 					out.verdict = "response changes with middleware header; investigate manually";
+				} else if ((t.rewrite || b.rewrite) && b.status === 200 && t.status === 200 && !bodyDiffers) {
+					out.verdict = "x-middleware-rewrite present (" + (t.rewrite || b.rewrite) + ") — middleware rewrite signal; combine with the CVE-2025-29927 header for the rewrite-bypass variant (verify manually)";
 				} else if (t.status === 0) {
 					out.verdict = "header probe errored; site may block it";
 				} else {
@@ -3989,13 +4027,13 @@ const TOOLS = [
 			},
 			render: (_args, v) =>
 				renderLines("bb_ct_fresh_assets", [
-					"domain: " + v.domain + " (" + v.count + " certificates seen)",
+					"domain: " + v.domain + " (" + v.count + " certificates seen, oldest " + (v.oldest ? new Date(v.oldest).toISOString().slice(0, 10) : "n/a") + ")",
 					"newest assets (probe these first):",
 					...v.fresh.map((a) => a.firstSeen + "  " + a.name),
 					v.note ? "note: " + v.note : "",
 				])
 		},
-		timeoutMs: 30000,
+		timeoutMs: 40000,
 		isConcurrencySafe: () => true,
 		async execute(args, exec) {
 			const out = { domain: String(args.domain || ""), count: 0, fresh: [], oldest: 0, note: "" };
@@ -4046,14 +4084,15 @@ const TOOLS = [
 					url: { type: "string" },
 					usernames: { type: "array", items: { type: "string" } },
 					endpoints: { type: "array", items: { type: "object", properties: { path: { type: "string" }, status: { type: "integer" }, flag: { type: "string" } }, required: ["path", "status", "flag"], additionalProperties: false } },
-					note: { type: "string" }
+					note: { type: "string" },
+					version: { type: "string" }
 				},
-				required: ["url", "usernames", "endpoints", "note"],
+				required: ["url", "usernames", "endpoints", "note", "version"],
 			},
 			render: (_args, v) =>
 				renderLines("bb_wordpress_surf", [
 					"target: " + v.url,
-					"usernames: " + (v.usernames.length ? v.usernames.join(", ") : "none"),
+					"usernames: " + (v.usernames.length ? v.usernames.join(", ") : "none") + (v.version ? " | version: " + v.version : ""),
 					...v.endpoints.filter((e) => e.flag).map((e) => "[" + e.flag + "] " + e.path + " -> " + e.status),
 					v.note ? "note: " + v.note : "",
 				])
@@ -4061,7 +4100,7 @@ const TOOLS = [
 		timeoutMs: 60000,
 		isConcurrencySafe: () => true,
 		async execute(args, exec) {
-			const out = { url: String(args.url || ""), usernames: [], endpoints: [], note: "" };
+			const out = { url: String(args.url || ""), usernames: [], endpoints: [], version: "", note: "" };
 			try {
 				const base = normalizeUrl(args.url).replace(/\/$/, "");
 				const probes = [
@@ -4095,11 +4134,15 @@ const TOOLS = [
 							f = "xmlrpc-live";
 						} else if (flag === "registration-open") {
 							// register page exists on every WP site; flag only when the form is actually open
-							if (res.status === 200 && /<form/i.test(body) && !/registration (is )?closed|not currently accepting|disabled by an administrator/i.test(body)) f = "registration-open";
-						} else if (flag && res.status === 200 && !/^\s*<!doctype\s+html|<html/i.test(body)) {
+							if (res.status === 200 && /<form/i.test(body) && !/registration (is )?closed|not currently accepting|disabled by an administrator|not allowed/i.test(body)) f = "registration-open";
+						} else if (flag === "version") {
+							// readme.html "Stable tag: X.Y" / "Version: X.Y" — real WP version disclosure
+							const vm = body.match(/Stable tag:\s*([0-9][0-9a-z.\-]*)/i) || body.match(/Version\s*:\s*([0-9][0-9a-z.\-]*)/i);
+							if (res.status === 200 && vm) { out.version = vm[1]; f = "version:" + vm[1]; }
+						} else if (flag && res.status === 200 && body.trim().length > 0 && !/^\s*<!doctype\s+html|<html/i.test(body)) {
 							// config/backup/dotfile hits must be real 200 non-HTML content, not 301-to-homepage / catchall pages
 							if (flag === "setup-wizard" && /setup|configure|install/i.test(body)) f = "setup-wizard-live";
-							else if (flag !== "setup-wizard") f = flag;
+							else if (flag !== "setup-wizard" && flag !== "version") f = flag;
 						}
 						out.endpoints.push({ path: p, status: res.status, flag: f });
 					} catch {
@@ -4146,13 +4189,13 @@ const TOOLS = [
 					v.note ? "note: " + v.note : "",
 				])
 		},
-		timeoutMs: 90000,
+		timeoutMs: 120000,
 		isConcurrencySafe: () => true,
 		async execute(args, exec) {
 			const out = { domain: String(args.domain || ""), scanned: 0, cacheable: [], note: "" };
 			try {
 				const domain = normalizeDomain(args.domain);
-				const limit = Math.min(parseInt(args.limit || 20, 10), 40);
+				const limit = Math.min(Math.max(parseInt(args.limit || 20, 10) || 20, 1), 40);
 				const { urls, error } = await cdxUrls(domain, exec, { filterJs: false, cap: 600 });
 				const sensitive = urls
 					.map((u) => {
@@ -4239,8 +4282,7 @@ const TOOLS = [
 						const params = [...url.searchParams.keys()];
 						if (!params.length || !(dynamicRe.test(url.pathname) || url.search.includes("="))) continue;
 						const prone = params.filter((p) => proneRe.test(p));
-						if (prone.length) rows.push({ url: clean, prone });
-						else if (rows.length < limit) rows.push({ url: clean, prone: [] });
+						rows.push({ url: clean, prone });
 					} catch {
 						// skip unparsable
 					}
@@ -4248,8 +4290,9 @@ const TOOLS = [
 				const ordered = [...rows].sort((a, b) => b.prone.length - a.prone.length);
 				out.total = ordered.length;
 				out.urls = ordered.slice(0, limit);
-				if (cdx.error && !otx.error) out.note = "CDX: " + cdx.error;
-				if (otx.error && !cdx.error) out.note = "OTX: " + otx.error;
+				if (cdx.error && otx.error) out.note = "BOTH sources failed: CDX " + cdx.error + "; OTX " + otx.error;
+				else if (cdx.error) out.note = "CDX: " + cdx.error;
+				else if (otx.error) out.note = "OTX: " + otx.error;
 				if (!out.urls.length) out.note = (out.note ? out.note + "; " : "") + "No parameterized URLs; try gau/katana locally on a bigger archive.";
 			} catch (e) {
 				out.error = shortErr(e);
@@ -4310,16 +4353,18 @@ const TOOLS = [
 					["Akamai GHOST", /akamaighost/i.test(h("server")) ? "server: akamaighost" : ""],
 				];
 				for (const [waf, ev] of sigs) if (ev) out.detected.push({ waf, evidence: ev });
+				// Incapsula is Imperva's CDN brand — never double-report from the same x-iinfo header
+				if (out.detected.some((d) => d.waf === "Imperva")) out.detected = out.detected.filter((d) => d.waf !== "Incapsula");
 				if (/cloudflare/i.test(h("server")) && !out.detected.length) out.detected.push({ waf: "Cloudflare", evidence: "server header" });
 				if (/nginx/i.test(h("server")) && !out.detected.length) out.pageNote = "server: nginx — no WAF signature matched (plain origin or WAF-less edge)";
 				const tamperMap = {
 					Cloudflare: "between, space2comment", Sucuri: "space2comment, randomcase",
 					Akamai: "charencode, randomcase", Imperva: "space2morehash, space2comment",
-					"AWS (LB/WAF)": "between, percentencode", Azure: "charunicodeencode, space2comment",
+					"AWS LB/CDN (not WAF)": "between, percentencode", "AWS WAF": "between, percentencode", Azure: "charunicodeencode, space2comment",
 					"F5 BIG-IP": "greatest, space2comment",
 				};
 				for (const d of out.detected) if (tamperMap[d.waf]) out.hints.push(d.waf + " -> --tamper=" + tamperMap[d.waf]);
-				if (/access denied|blocked|challenge|verify you are human|sorry/i.test(body)) out.pageNote = (out.pageNote ? out.pageNote + "; " : "") + "block/challenge page detected in body";
+				if (/access denied|blocked|challenge|verify you are human/i.test(body)) out.pageNote = (out.pageNote ? out.pageNote + "; " : "") + "block/challenge page detected in body";
 			} catch (e) {
 				out.error = shortErr(e);
 			}
@@ -4383,7 +4428,7 @@ const TOOLS = [
 						const acac = res.headers.get("access-control-allow-credentials") || "";
 						const vary = res.headers.get("vary") || "";
 						let reflected = false;
-						if (acao !== "" && acao !== "*" && acao !== "null") {
+						if (acao !== "" && acao !== "*") {
 							if (acao === origin) reflected = true;
 							else if (origin !== "null") {
 								try { reflected = new URL(acao).hostname === new URL(origin).hostname; } catch { reflected = false; }
@@ -4401,7 +4446,8 @@ const TOOLS = [
 					else if (t.reflected) out.findings.push(`origin reflected verbatim: ${t.origin} (${t.method})`);
 					else if (t.acao === "*" && t.acac === "true") out.findings.push(`wildcard ACAO: * with credentials (${t.method}) — invalid per spec`);
 				}
-				if (out.origins_tests.some((t) => t.reflected) && !out.origins_tests.some((t) => /origin/i.test(t.vary))) {
+				const getTests = out.origins_tests.filter((t) => t.method === "GET");
+				if (getTests.some((t) => t.reflected) && !getTests.some((t) => /origin/i.test(t.vary))) {
 					out.findings.push("reflected ACAO without Vary: Origin — cacheable cross-origin responses");
 				}
 				out.summary = out.findings.length
@@ -4543,13 +4589,14 @@ const TOOLS = [
 					const clean = u.split(/[?#]/)[0];
 					if (seen.has(clean)) continue;
 					seen.add(clean);
-					const ext = (path.match(/\.([a-z0-9]+)$/i) || [])[1] || "?";
+					const em = re.exec(path);
+					const ext = em ? em[1].toLowerCase() : "?";
 					out.by_extension[ext] = (out.by_extension[ext] || 0) + 1;
 					// json/xml/txt/pdf/doc/xls/py are too common to be findings — count them but don't list
 					if (!["json", "xml", "txt", "csv", "pdf", "doc", "docx", "pptx", "rtf", "xls", "py"].includes(ext)) out.matches.push(clean);
 				}
 				out.matches = out.matches.slice(0, limit);
-				const exts = Object.entries(out.by_extension).sort((a, b) => b[1] - a[1]).map(([e, n]) => e + "x" + n).join(", ");
+				const exts = Object.entries(out.by_extension).sort((a, b) => b[1] - a[1]).map(([e, n]) => e + "=" + n).join(", ");
 				out.summary = out.matches.length
 					? `${out.matches.length} sensitive file(s) from ${urls.length} archived URLs (${exts})`
 					: `no sensitive files in ${urls.length} archived URLs`;
@@ -4683,7 +4730,7 @@ const TOOLS = [
 	},
 {
 		name: "bb_graphql_introspection",
-		description: "Probe common GraphQL endpoints (/graphql, /api/graphql, /v1/graphql, /query, /gql, /graphiql) for enabled introspection: POST __schema query, detect 200 + data.__schema JSON, report schema type count and mutability. Keyless: direct HTTP.",
+		description: "Probe common GraphQL endpoints (/graphql, /api/graphql, /v1/graphql, /query, /gql, /graphiql, /graphql/graphql, /api/v1/graphql) for enabled introspection: POST __schema query, detect 200 + data.__schema JSON, report schema type count and mutability. Keyless: direct HTTP.",
 		parameters: {
 			type: "object",
 			additionalProperties: false,
@@ -4769,7 +4816,7 @@ const TOOLS = [
 	},
 {
 		name: "bb_source_leak_scan",
-		description: "Probe ~25 quick-win source/build-artifact leak paths in one loop: .env variants, .git, swagger/openapi, build-info/version files, .DS_Store, crossdomain.xml, laravel/telescope/horizon; optionally derive the live JS build hash and request its .js.map sourcemap. Keyless: direct HTTP.",
+		description: "Probe 23 quick-win source/build-artifact leak paths in one loop: .env variants, .git, swagger/openapi, build-info/version files, .DS_Store, crossdomain.xml, laravel/telescope/horizon; optionally derive the live JS build hash and request its .js.map sourcemap. Keyless: direct HTTP.",
 		parameters: {
 			type: "object",
 			additionalProperties: false,
@@ -4801,7 +4848,7 @@ const TOOLS = [
 					v.error ? "error: " + v.error : ""
 				].filter(Boolean))
 		},
-		timeoutMs: 40000,
+		timeoutMs: 80000,
 		isConcurrencySafe: () => true,
 		async execute(args, exec) {
 			const base = normalizeUrl(args.url).replace(/\/+$/, "");
@@ -5035,7 +5082,8 @@ const TOOLS = [
 				for (let i = 0; i < junkPaths.length; i++) out.junk.push({ path: junkPaths[i], status: junkRes[i].status, size: junkRes[i].size });
 				const anyJunk200 = out.junk.some((j) => j.status === 200);
 				const sameAsJunk = anyJunk200 && out.junk.some((j) => j.status === cand.status && Math.abs(j.size - cand.size) / Math.max(cand.size, 1) < 0.15);
-				if (cand.status !== 200) out.verdict = `candidate returns HTTP ${cand.status} — not a soft-404 case; if it was 200 in a prior scan re-check (build rotation, auth-gated)`;
+				if (cand.status === 0) out.verdict = "PROBE ERROR — candidate fetch failed (network/blocked); cannot judge soft-404, re-run or check connectivity";
+				else if (cand.status !== 200) out.verdict = `candidate returns HTTP ${cand.status} — not a soft-404 case; if it was 200 in a prior scan re-check (build rotation, auth-gated)`;
 				else if (sameAsJunk) out.verdict = "SOFT-404 LIKELY — candidate 200 body size matches junk-path 200s on same host; treat as false positive unless a distinguishable marker is present";
 				else if (anyJunk200) out.verdict = "Host serves 200 on junk paths (soft-404 host) but candidate body differs in size — borderline; confirm the content is real before reporting";
 				else out.verdict = "Candidate 200 unique on host (junk paths non-200) — exposure looks real; verify content + impact before reporting";
@@ -5048,7 +5096,7 @@ const TOOLS = [
 	},
 {
 		name: "bb_vpn_fingerprint",
-		description: "Fingerprint enterprise VPN/SSL-VPN appliances by per-vendor login paths and Set-Cookie markers: Cisco ASA (+CSCOE+/logon.html, webvpn), Fortinet (/remote/login), Citrix (/vpn/index.html), Palo Alto (/global-protect/login.esp), Pulse/Ivanti (/dana-na/auth/url_default/welcome.cgi), SonicWall, F5 Big-IP; returns vendor + version hints for CVE cross-reference. Keyless: direct HTTP.",
+		description: "Fingerprint enterprise VPN/SSL-VPN appliances by per-vendor login paths and Set-Cookie markers: Cisco ASA (+CSCOE+/logon.html, webvpn), Fortinet (/remote/login), Citrix (/vpn/index.html), Palo Alto (/global-protect/login.esp), Pulse/Ivanti (/dana-na/auth/url_default/welcome.cgi), SonicWall, F5 Big-IP; returns vendor + CVE-era login paths for cross-reference. Keyless: direct HTTP.",
 		parameters: {
 			type: "object",
 			additionalProperties: false,
@@ -5159,23 +5207,28 @@ const TOOLS = [
 					v.error ? "error: " + v.error : ""
 				].filter(Boolean))
 		},
-		timeoutMs: 25000,
+		timeoutMs: 40000,
 		isConcurrencySafe: () => true,
 		async execute(args, exec) {
 			const domain = normalizeDomain(args.domain);
 			const out = { domain, spf: {}, dmarc: {}, caa: [], mta_sts: "", findings: [], summary: "", error: "" };
 			const DOH = "https://cloudflare-dns.com/dns-query";
+			const queries = [];
+			// returns { value, error } — DoH failure is distinguishable from record-absent
 			async function queryTxt(name) {
 				const b = withBudget(exec, 4000);
 				try {
 					const resp = await fetch(`${DOH}?name=${encodeURIComponent(name)}&type=TXT`, { method: "GET", signal: b.signal, headers: { accept: "application/dns-json" } });
+					if (!resp.ok) return { value: "", error: "HTTP " + resp.status };
 					const j = await resp.json();
-					if (j && j.Answer) {
-						return j.Answer.filter((a) => a.type === 16).map((a) => (a.data || "").replace(/^"|"$/g, "").replace(/""/g, '"')).join("");
+					if (!j || j.Status === 2) return { value: "", error: "SERVFAIL/refused" };
+					if (j.Answer) {
+						const v = j.Answer.filter((a) => a.type === 16).map((a) => (a.data || "").replace(/^"|"$/g, "").replace(/""/g, '"')).join("");
+						return { value: v, error: null };
 					}
-					return "";
-				} catch {
-					return "";
+					return { value: "", error: null };
+				} catch (e) {
+					return { value: "", error: shortErr(e) };
 				} finally {
 					b.dispose();
 				}
@@ -5184,40 +5237,77 @@ const TOOLS = [
 				const b = withBudget(exec, 4000);
 				try {
 					const resp = await fetch(`${DOH}?name=${encodeURIComponent(name)}&type=CAA`, { method: "GET", signal: b.signal, headers: { accept: "application/dns-json" } });
+					if (!resp.ok) return { value: "", error: "HTTP " + resp.status };
 					const j = await resp.json();
-					if (j && j.Answer) return j.Answer.filter((a) => a.type === 257).map((a) => String(a.data || "")).join(" ");
-					return "";
-				} catch {
-					return "";
+					if (!j || j.Status === 2) return { value: "", error: "SERVFAIL/refused" };
+					if (j.Answer) return { value: j.Answer.filter((a) => a.type === 257).map((a) => String(a.data || "")).join(" "), error: null };
+					return { value: "", error: null };
+				} catch (e) {
+					return { value: "", error: shortErr(e) };
 				} finally {
 					b.dispose();
 				}
 			}
+			async function safe(name) {
+				const r = await queryTxt(name);
+				queries.push({ name, ...r });
+				return r;
+			}
 			try {
-				const spf = await queryTxt(domain);
-				out.spf.record = spf || "";
-				if (spf) {
-					const ips = [];
-					for (const m of spf.matchAll(/ip4:([0-9./]+)/g)) ips.push(m[1]);
-					for (const m of spf.matchAll(/ip6:([0-9a-f:/]+)/g)) ips.push(m[1]);
-					out.spf.ips = ips;
-					const inc = [...spf.matchAll(/include:([^\s]+)/g)].map((m) => m[1]);
-					out.spf.includes = inc;
-					if (!/[\-\~]all/.test(spf)) out.findings.push("SPF lacks a hard (-all) or soft (~all) fail — spoofing-allowed default");
+				const spfQ = await safe(domain);
+				if (spfQ.error) {
+					out.findings.push("SPF lookup FAILED (" + spfQ.error + ") — result unknown, do NOT report spoofable");
 				} else {
-					out.findings.push("NO SPF record — domain spoofable for email");
+					const spf = spfQ.value || "";
+					out.spf.record = spf;
+					if (spf) {
+						const ips = [];
+						for (const m of spf.matchAll(/ip4:([0-9./]+)/g)) ips.push(m[1]);
+						for (const m of spf.matchAll(/ip6:([0-9a-f:/]+)/g)) ips.push(m[1]);
+						out.spf.ips = ips;
+						const inc = [...spf.matchAll(/include:([^\s]+)/g)].map((m) => m[1]);
+						out.spf.includes = inc;
+						if (/\+all(\s|$)/.test(spf)) out.findings.push("SPF uses +all — explicitly ALLOWS everyone to send as the domain (worst case)");
+						else if (!/[\-\~]all/.test(spf)) out.findings.push("SPF lacks a hard (-all) or soft (~all) fail — spoofing-allowed default");
+					} else {
+						out.findings.push("NO SPF record — domain spoofable for email");
+					}
 				}
-				const dmarc = await queryTxt("_dmarc." + domain);
-				out.dmarc.record = dmarc || "";
-				if (!dmarc) out.findings.push("NO DMARC record — receivers must guess; spoofed mail lands in inbox");
-				else if (/p=none/.test(dmarc)) out.findings.push("DMARC p=none — monitoring only, spoofed mail NOT rejected");
-				const caa = await queryCaa(domain);
-				out.caa = caa ? caa.split(/\s+/).slice(0, 8) : [];
-				if (!out.caa.length) out.findings.push("NO CAA record — any CA may issue certs for the domain (subdomain-takeover-adjacent risk)");
-				const mtaSts = await queryTxt("_mta-sts." + domain);
-				out.mta_sts = mtaSts || "";
-				if (!mtaSts) out.findings.push("NO MTA-STS — no opportunistic TLS enforcement on inbound mail");
-				out.summary = out.findings.length
+				const dmarcQ = await safe("_dmarc." + domain);
+				if (dmarcQ.error) {
+					out.findings.push("DMARC lookup FAILED (" + dmarcQ.error + ") — result unknown");
+				} else {
+					const dmarc = dmarcQ.value || "";
+					out.dmarc.record = dmarc;
+					if (!dmarc) out.findings.push("NO DMARC record — receivers must guess; spoofed mail lands in inbox");
+					else if (/p=none/.test(dmarc)) out.findings.push("DMARC p=none — monitoring only, spoofed mail NOT rejected");
+				}
+				const caaQ = await queryCaa(domain);
+				if (caaQ.error) {
+					out.findings.push("CAA lookup FAILED (" + caaQ.error + ") — result unknown");
+				} else {
+					out.caa = caaQ.value ? caaQ.value.split(/\s+/).slice(0, 8) : [];
+					if (!out.caa.length) out.findings.push("NO CAA record — any CA may issue certs for the domain (subdomain-takeover-adjacent risk)");
+				}
+				const mtaQ = await safe("_mta-sts." + domain);
+				if (mtaQ.error) {
+					out.findings.push("MTA-STS lookup FAILED (" + mtaQ.error + ") — result unknown");
+				} else {
+					out.mta_sts = mtaQ.value || "";
+					if (!mtaQ.value) out.findings.push("NO MTA-STS — no opportunistic TLS enforcement on inbound mail");
+					else out.findings.push("MTA-STS present: " + mtaQ.value.slice(0, 60));
+				}
+				const tlsQ = await safe("_smtp-tlsrpt." + domain);
+				if (tlsQ.error) out.findings.push("TLS-RPT lookup FAILED (" + tlsQ.error + ")");
+				else if (tlsQ.value) out.findings.push("TLS-RPT present: " + tlsQ.value.slice(0, 60));
+				for (const sel of ["default", "google", "selector1", "s1", "k1", "dkim"]) {
+					const dkQ = await safe(sel + "._domainkey." + domain);
+					if (dkQ.error) { out.findings.push("DKIM " + sel + " lookup FAILED (" + dkQ.error + ")"); break; }
+					if (dkQ.value) { out.dkim_selector = sel; out.findings.push("DKIM selector '" + sel + "' present: " + dkQ.value.slice(0, 60)); break; }
+				}
+				const errs = queries.filter((q) => q.error);
+				if (errs.length) out.summary = "INCOMPLETE — " + errs.length + " of " + queries.length + " DNS queries failed (DoH unreachable/blocked); hardening findings above are NOT authoritative";
+				else out.summary = out.findings.length
 					? `email-hardening gaps: ${out.findings.length} (${out.findings[0]})`
 					: "SPF+DMARC+CAA present and strict — email spoofing surface small";
 			} catch (e) {
@@ -5381,17 +5471,29 @@ const TOOLS = [
 						}
 					}
 				});
-				// identical FULL body for different header values + a cache layer in front -> header unkeyed
+				// identical FULL body for different header values + cache layer + at least ONE probe
+				// PROVEN cache-served (HIT/Age>0) -> header unkeyed. Identical bodies alone are the
+				// default outcome (same URL), so without per-probe cache evidence this is not a finding.
+				const isCacheHit = (hdrStr) => /(x-cache|cf-cache-status|x-cache-status)[^,;]*\bhit\b/i.test(hdrStr) || /(^|[,\s])age:\s*[1-9]\d*/i.test(hdrStr);
 				const grouped = {};
 				for (const r of out.results) (grouped[r.header] = grouped[r.header] || []).push(r);
 				for (const [h, rs] of Object.entries(grouped)) {
 					const hset = new Set(rs.map((r) => hashes.get(h + "\u0000" + r.value)));
-					if (rs.length >= 2 && rs.every((r) => r.status && r.body_len > 0) && hset.size === 1 && sawCache) {
-						out.unkeyed.push(h + " (identical body across different " + h + " values + cache layer in front)");
+					const probeCache = rs.some((r) => isCacheHit(r.cache_headers));
+					const bodyReflect = rs.some((r) => r.cache_headers !== "-" && r.body_len > 0);
+					if (rs.length >= 2 && rs.every((r) => r.status && r.body_len > 0) && hset.size === 1 && sawCache && probeCache) {
+						out.unkeyed.push(h + " (identical body across different " + h + " values, cache layer in front AND probe responses cache-served — unkeyed header)");
+					}
+					if (rs.length >= 2 && !probeCache && sawCache) {
+						out.notes_supplement = out.notes_supplement || [];
+						out.notes_supplement.push(h + ": identical bodies but no per-probe cache HIT/Age evidence — responses may be origin-served; re-test with a cacheable static path");
 					}
 				}
+				const supp = (out.notes_supplement || []).join("; ");
 				out.summary = sawCache
-					? (out.unkeyed.length ? `cache present (${out.cache_indicators.join(", ")}) and ${out.unkeyed.length} header(s) appear UNKEYED — request-splitting/cache poisoning rules apply` : "cache present but no unkeyed header observed on this path")
+					? (out.unkeyed.length
+						? `cache present (${out.cache_indicators.join(", ")}) and ${out.unkeyed.length} header(s) appear UNKEYED — request-splitting/cache poisoning rules apply${supp ? " — " + supp : ""}`
+						: `cache present but no unkeyed header observed on this path${supp ? " — " + supp : ""}`)
 					: "no cache indicators on this path — try a static asset (/index.css) or asset-manifest paths";
 			} catch (e) {
 				out.error = shortErr(e);
@@ -5539,7 +5641,7 @@ const TOOLS = [
 			const target = normalizeUrl(args.url);
 			const uf = args.usernameField || "username";
 			const pf = args.passwordField || "password";
-			const out = { url: target, results: [], signal: "NONE", summary: "", error: "" };
+			const out = { url: target, results: [], signal: "NONE", summary: "", error: "", errors: [] };
 			try {
 				const mkBody = (u, p) => JSON.stringify({ [uf]: u, [pf]: p });
 				const payloads = [
@@ -5572,16 +5674,20 @@ const TOOLS = [
 							const marker = MARKERS.filter(m => low.includes(m));
 							out.results.push({ name: p.name, payload: p.payload, status: r.status, body_len: txt.length, marker });
 						} catch (e) {
-							out.results.push({ name: p.name, payload: p.payload, status: 0, body_len: 0, marker: ["error: " + shortErr(e)] });
+							out.results.push({ name: p.name, payload: p.payload, status: 0, body_len: 0, marker: [] });
+							out.errors.push(p.name + ": " + shortErr(e));
 						} finally {
 							b.dispose();
 						}
 				}
 				const nonBase = out.results.slice(1);
+				const baselineMarkers = new Set(MARKERS.filter((m) => baseline.text.includes(m)));
+				// only markers NOT already in the baseline page count as signals
+				const newMarkerOf = (r) => r.marker.filter((m) => !baselineMarkers.has(m));
 				const statusChange = nonBase.filter(r => r.status > 0 && r.status !== baseline.status && ![400, 422].includes(r.status));
 				const bodyChanged = nonBase.filter(r => r.status > 0 && r.body_len > baseline.len + 150);
-				const markerHit = nonBase.filter(r => r.marker.length > 0);
-				if (markerHit.length) { out.signal = "BODY_MARKER"; out.summary = "Login body differs & session/auth markers appear with NoSQL payloads — verify manually: " + markerHit.map(r => r.name).join(", "); }
+				const markerHit = nonBase.filter(r => newMarkerOf(r).length > 0);
+				if (markerHit.length) { out.signal = "BODY_MARKER"; out.summary = "Markers absent from baseline but present with NoSQL payloads (" + markerHit.map(r => r.name + ": " + newMarkerOf(r).join(",")).join("; ") + ") — verify manually"; }
 				else if (statusChange.length) { out.signal = "STATUS_CHANGE"; out.summary = "Status changes vs baseline for: " + statusChange.map(r => r.name + " -> " + r.status).join(", ") + " — verify manually (could be WAF or a real $ne bypass)"; }
 				else if (bodyChanged.length) { out.signal = "STATUS_CHANGE"; out.summary = "Response grew significantly for " + bodyChanged.map(r => r.name).join(", ") + " (possible operator evaluated) — verify manually"; }
 				else { out.signal = "NONE"; out.summary = "No auth-bypass signal on " + target + " — endpoint either sanitizes operators or rejects with stable 400/401; try $where / $expr JSON variants and URL-encoded bodies"; }
@@ -5704,7 +5810,7 @@ const TOOLS = [
 					v.note ? "note: " + v.note : ""
 				].filter(Boolean))
 		},
-		timeoutMs: 90000,
+		timeoutMs: 120000,
 		isConcurrencySafe: () => true,
 		async execute(args, exec) {
 			const d = normalizeDomain(args.domain);
@@ -5783,7 +5889,7 @@ const TOOLS = [
 					v.note ? "note: " + v.note : ""
 				].filter(Boolean))
 		},
-		timeoutMs: 30000,
+		timeoutMs: 60000,
 		isConcurrencySafe: () => true,
 		async execute(args, exec) {
 			const q = String(args.query || "").trim();
@@ -5795,7 +5901,7 @@ const TOOLS = [
 				try { data = JSON.parse(text || "{}"); } catch { data = {}; }
 				const list = Array.isArray(data.data) ? data.data : Array.isArray(data) ? data : [];
 				out.total = list.length;
-				const cap = Math.min(parseInt(args.limit || 3, 10), 8);
+				const cap = Math.min(Math.max(parseInt(args.limit || 3, 10) || 3, 1), 8);
 				const ids = list.map((x) => String(x.id || "")).filter(Boolean).slice(0, cap);
 				await mapPool(ids, 3, async (id) => {
 					try {
@@ -5818,7 +5924,7 @@ const TOOLS = [
 	},
 	{
 		name: "bb_dockerhub_search",
-		description: "Keyless Docker Hub API recon: search repositories under an org/company and list latest tags — leaked internal images, hardcoded secrets in build layers, abandoned orgs. GET-only.",
+		description: "Keyless Docker Hub API recon: search repositories under an org/company and list latest tags — surface internal-looking image names, stale/abandoned orgs and version gaps (metadata only; no layer content is fetched). GET-only.",
 		parameters: {
 			type: "object",
 			additionalProperties: false,
@@ -5850,8 +5956,9 @@ const TOOLS = [
 		async execute(args, exec) {
 			const org = String(args.org || "").trim();
 			const out = { org, repos: [], note: "" };
+			if (!org) { out.note = "org required — pass a Docker Hub namespace/company name"; return out; }
 			try {
-				const limit = Math.min(parseInt(args.limit || 15, 10), 40);
+				const limit = Math.min(Math.max(parseInt(args.limit || 15, 10) || 15, 1), 40);
 				const { text } = await fetchText("https://hub.docker.com/v2/search/repositories/?query=" + encodeURIComponent(org) + "&page_size=25", exec, { budget: 15000, headers: { accept: "application/json" } });
 				let data;
 				try { data = JSON.parse(text || "{}"); } catch { data = {}; }
@@ -5912,14 +6019,14 @@ const TOOLS = [
 					v.note ? "note: " + v.note : ""
 				].filter(Boolean))
 		},
-		timeoutMs: 60000,
+		timeoutMs: 150000,
 		isConcurrencySafe: () => true,
 		async execute(args, exec) {
 			const d = normalizeDomain(args.domain);
 			const out = { domain: d, checked: 0, dangling: [], note: "" };
 			const TAKEOVER = /(s3[\w.-]*\.amazonaws\.com|blob\.core\.windows\.net|\.cloudfront\.net|herokuapp\.com|\.ghost\.io|\.netlify\.app|\.surge\.sh|\.readme\.io|github\.io|\.fastly\.net|\.zendesk\.com|\.vercel\.app|\.azurewebsites\.net|\.firebaseio\.com|\.myshopify\.com)/i;
 			try {
-				const limit = Math.min(parseInt(args.limit || 40, 10), 80);
+				const limit = Math.min(Math.max(parseInt(args.limit || 40, 10) || 40, 1), 80);
 				const { text } = await fetchText("https://crt.sh/?q=%25." + encodeURIComponent(d) + "&output=json", exec, { budget: 30000, headers: { accept: "application/json" } });
 				let rows;
 				try { rows = JSON.parse(text || "[]"); } catch { rows = []; }
@@ -5939,7 +6046,8 @@ const TOOLS = [
 						try {
 							const { text: aj } = await fetchText("https://cloudflare-dns.com/dns-query?name=" + encodeURIComponent(target) + "&type=A", exec, { budget: 8000, headers: { accept: "application/dns-json" } });
 							const ajj = JSON.parse(aj || "{}");
-							nx = ajj.Status === 3 || (Array.isArray(ajj.Answer) && !ajj.Answer.length);
+							// NXDOMAIN is DoH Status 3 — empty Answer with Status 0/2 (no records / SERVFAIL) is NOT NXDOMAIN
+							nx = ajj.Status === 3;
 						} catch {
 							nx = false;
 						}
@@ -6056,7 +6164,7 @@ const TOOLS = [
 			const d = normalizeDomain(args.domain);
 			const out = { domain: d, harvested: 0, alive: [], note: "" };
 			try {
-				const cap = Math.min(parseInt(args.limit || 30, 10), 60);
+				const cap = Math.min(Math.max(parseInt(args.limit || 30, 10) || 30, 1), 60);
 				const { urls, error } = await cdxUrls(d, exec, { cap: cap * 3 });
 				if (error) out.note = "wayback: " + error;
 				const interesting = urls.filter((u) => /(admin|api|backup|upload|console|internal|staging|dev|test|debug|swagger|graphql|\.sql|\.env|download|export|import|config|panel|wp-)/i.test(u)).slice(0, cap);
@@ -6065,7 +6173,7 @@ const TOOLS = [
 					try {
 						const { res } = await fetchRes(u, exec, { budget: 8000, redirect: "manual" });
 						const body = await readLimited(res, 400);
-						if (res.status >= 200 && res.status < 500 && res.status !== 404) out.alive.push({ url: u, status: res.status, size: body.length });
+						if ((res.status >= 200 && res.status < 300) || res.status === 401 || res.status === 403) out.alive.push({ url: u, status: res.status, size: body.length });
 					} catch {
 						// gone/blocked
 					}
@@ -6113,36 +6221,58 @@ const TOOLS = [
 					v.note ? "note: " + v.note : ""
 				].filter(Boolean))
 		},
-		timeoutMs: 60000,
+		timeoutMs: 150000,
 		isConcurrencySafe: () => true,
 		async execute(args, exec) {
 			const d = normalizeDomain(args.domain);
 			const empty = { url: "", paths: [] };
 			const out = { domain: d, live: { ...empty }, archived: { ...empty }, added: [], removed: [], note: "" };
 			const extract = (spec) => (spec && typeof spec === "object" && spec.paths && typeof spec.paths === "object" ? Object.keys(spec.paths) : []);
+			// yaml specs: cheap line-scrape of top-level path keys (2-space indent + "/...:") — no yaml dependency needed
+			const extractYamlPaths = (text) => {
+				if (!text || !/^(openapi|swagger):/mi.test(text)) return [];
+				const paths = [];
+				for (const line of String(text).split(/\r?\n/)) {
+					const m = line.match(/^\s{2}\/[^:\s][^:]*:$/);
+					if (m) paths.push(m[0].trim().replace(/:$/, ""));
+				}
+				return paths;
+			};
 			try {
-				const candidates = args.specPath ? [String(args.specPath)] : ["/openapi.json", "/swagger.json", "/swagger/v1/swagger.json", "/v2/api-docs", "/api-docs", "/api/openapi.json"];
+				const candidates = args.specPath ? [String(args.specPath)] : ["/openapi.json", "/openapi.yaml", "/swagger.json", "/swagger.yaml", "/swagger/v1/swagger.json", "/v2/api-docs", "/api-docs", "/api/openapi.json"];
 				for (const p of candidates) {
 					try {
-						const { res, text } = await fetchText("https://" + d + p, exec, { budget: 10000 });
-						if (res.status === 200 && /json/.test(res.headers.get("content-type") || "")) {
+						const { res, text } = await fetchText("https://" + d + p, exec, { budget: 12000 });
+						if (res.status !== 200) continue;
+						if (/json/.test(res.headers.get("content-type") || "")) {
 							const spec = JSON.parse(text);
 							const paths = extract(spec);
 							if (paths.length) { out.live = { url: p, paths }; break; }
 						}
+						const ypaths = extractYamlPaths(text);
+						if (ypaths.length) { out.live = { url: p, paths: ypaths }; break; }
 					} catch {
 						// try next candidate
 					}
 				}
-				// newest archived spec-like URL
+				// NEWEST archived spec snapshot (availability API) with web/2id_ fallback —
+				// `2015id_` pinned an old snapshot and hid removed/shadow endpoints
 				const { urls } = await cdxUrls(d, exec, { cap: 400 });
-				const specUrls = urls.filter((u) => /(openapi|swagger|api-docs|api\.json)/i.test(u)).slice(0, 3);
+				const specUrls = uniq(urls.filter((u) => /(openapi|swagger|api-docs|api\.json|\.ya?ml$)/i.test(u))).slice(0, 4);
 				for (const u of specUrls) {
 					try {
-						const { text } = await fetchText("https://web.archive.org/web/2015id_/" + u, exec, { budget: 20000 });
+						let ts = "";
+						try {
+							const av = await fetchText("https://archive.org/wayback/available?url=" + encodeURIComponent(u) + "&timestamp=now", exec, { budget: 12000 });
+							const aj = JSON.parse(av.text || "{}");
+							ts = (aj.archived_snapshots && aj.archived_snapshots.closest && aj.archived_snapshots.closest.timestamp) || "";
+						} catch { /* keep ts="" -> fallback */ }
+						const { text } = await fetchText("https://web.archive.org/web/" + (ts ? ts + "id_" : "2id_") + "/" + u, exec, { budget: 25000 });
 						const spec = JSON.parse(text);
 						const paths = extract(spec);
 						if (paths.length) { out.archived = { url: u, paths }; break; }
+						const ypaths = extractYamlPaths(text);
+						if (ypaths.length) { out.archived = { url: u, paths: ypaths }; break; }
 					} catch {
 						// try next archived candidate
 					}
@@ -6213,7 +6343,7 @@ const TOOLS = [
 							}
 						};
 						walk(j);
-						out.scopes = out.scopes.slice(0, Math.min(parseInt(args.limit || 30, 10), 100));
+						out.scopes = out.scopes.slice(0, Math.min(Math.max(parseInt(args.limit || 30, 10) || 30, 1), 100));
 						// dedupe
 						const seen = new Set();
 						out.scopes = out.scopes.filter((s) => (seen.has(s.identifier) ? false : (seen.add(s.identifier), true)));
@@ -6224,7 +6354,8 @@ const TOOLS = [
 				} else {
 					out.fallback = true;
 					const { text } = await fetchText("https://hackerone.com/programs/search?query=&sort_type=published_at", exec, { budget: 20000 });
-					const handles = uniq((text.match(/hackerone\.com\/([a-z0-9_-]+)(?:"|\/)/gi) || []).map((m) => m.replace(/^hackerone\.com\//i, "").replace(/["/]/g, "")).filter((h) => /^[a-zA-Z0-9][a-z0-9_-]{2,}$/.test(h))).slice(0, 40);
+					const NON_PROGRAM = new Set(["hacktivity", "reports", "security", "users", "programs", "settings", "jobs", "about", "careers", "blog", "help", "support", "leaderboard", "bounties", "updates", "search", "signup", "login", "directory", "resources", "community", "har-assets", "analytics", "features", "privacy", "terms", "pricing", "contact", "events", "press", "partners"]);
+					const handles = uniq((text.match(/hackerone\.com\/([a-z0-9_-]+)(?:"|\/)/gi) || []).map((m) => m.replace(/^hackerone\.com\//i, "").replace(/["/]/g, "")).filter((h) => /^[a-zA-Z0-9][a-z0-9_-]{2,}$/.test(h) && !NON_PROGRAM.has(h.toLowerCase()))).slice(0, 40);
 					for (const h of handles.slice(0, 12)) out.scopes.push({ identifier: h, type: "program-handle", eligible: true });
 					out.note = "public index is HTML; extracted " + handles.length + " program handles — pass one to get its real scope JSON.";
 				}
@@ -6480,7 +6611,7 @@ const TOOLS = [
 					push("negative", -1, "negative boundary — index confusion / signed handling");
 					push("max-int", 999999999, "max_int — overflow / fallback to first record");
 					push("plus-one", n + 1, "next sibling object (off-by-one)");
-					push("minus-one", Math.max(0, n - 1), "previous sibling object (off-by-one)");
+					if (n > 1) push("minus-one", n - 1, "previous sibling object (off-by-one)");
 					push("same-length-random", randDigits(String(id).length), "another random ID of the same length — pool-style cross-account swap");
 					push("empty", "", "empty value — default object / auth confusion");
 					push("null", "null", "null value (JSON) — unset object reference");
@@ -6488,13 +6619,14 @@ const TOOLS = [
 				} else if (isUuid) {
 					push("zero-uuid", "00000000-0000-0000-0000-000000000000", "all-zero UUID — nil object handling");
 					push("flip-segment", id.slice(0, 14) + "ffff" + id.slice(18), "mutate a UUID segment — sibling guess");
-					const mut = id.slice(0, 27) + (parseInt(id.slice(27), 16) ^ 1).toString(16).padStart(12, "0");
+					const mut = id.slice(0, 24) + (parseInt(id.slice(24), 16) ^ 1).toString(16).padStart(12, "0");
 					push("last-nibble-xor", mut, "flip last hex nibble — adjacent UUID sibling");
 					push("same-length-random", Array.from({ length: 36 }, () => "0123456789abcdef"[Math.floor(Math.random() * 16)]).join(""), "random UUID — unidentified object guess");
 				} else {
 					push("empty", "", "empty value — default object / auth confusion");
 					push("null", "null", "null value (JSON) — unset object reference");
-					push("parent-id", id.split("_")[0] || id.split("-")[0], "parent collection / prefix ID — vertical BOLA");
+					const parent = id.split("_")[0] || id.split("-")[0];
+					if (parent && parent !== id) push("parent-id", parent, "parent collection / prefix ID — vertical BOLA");
 					push("same-length-random", randDigits(String(id).length) || Array.from({ length: String(id).length }, () => "abcdefghijklmnopqrstuvwxyz0123456789"[Math.floor(Math.random() * 36)]).join(""), "random same-length token — pool-style swap");
 				}
 				out.tests = out.tests.filter((t, i, a) => a.findIndex((x) => x.name === t.name && x.replacement === t.replacement) === i);
@@ -6910,8 +7042,31 @@ export function apply(ctx) {
 		ctx.systemPrompt.section({ name: "tool:bugbounty", order: 115, text: GUIDANCE });
 	}
 	for (const def of TOOLS) {
-		ctx.tools.register(def);
+		ctx.tools.register(withErrorContract(def));
 	}
+}
+
+// ---------------------------------------------------------------------------
+// error-contract: every tool that writes out.error must declare + render it.
+// This central wrapper patches schema + render so a silently-swallowed error
+// field can never vanish from the model's view again.
+// ---------------------------------------------------------------------------
+function withErrorContract(def) {
+	if (!def || !def.output || !def.output.schema || !def.output.schema.properties) return def;
+	if (!("error" in def.output.schema.properties)) {
+		def.output.schema.properties.error = { type: "string" };
+	}
+	if (typeof def.output.render === "function") {
+		const baseRender = def.output.render;
+		def.output.render = (args, v) => {
+			const base = baseRender(args, v);
+			if (v && v.error && typeof base === "string" && !base.includes(String(v.error))) {
+				return base.replace(/\n?$/, "") + "\n⚠ error: " + v.error;
+			}
+			return base;
+		};
+	}
+	return def;
 }
 
 // ---------------------------------------------------------------------------
@@ -6921,12 +7076,15 @@ export function apply(ctx) {
 // ---------------------------------------------------------------------------
 
 export const bbApi = Object.fromEntries(
-	TOOLS.map((def) => [
-		def.name,
-		{
-			name: def.name,
-			description: def.description,
-			execute: (args = {}) => def.execute(args)
-		}
-	])
+	TOOLS.map((def) => {
+		withErrorContract(def);
+		return [
+			def.name,
+			{
+				name: def.name,
+				description: def.description,
+				execute: (args = {}) => def.execute(args)
+			}
+		];
+	})
 );
