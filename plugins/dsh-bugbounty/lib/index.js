@@ -588,8 +588,10 @@ const CHECKLIST = [
 		"SVG attack-surface battery (renderer/image-pipeline contexts): xlink:href external-fetch SSRF inside the image-processing pipeline; local-file-presence oracle via dual image refs (Is-Picture-Present \u2014 one ref to a guessed local file, one to a known-host file, compare doc-image presence) + library-version fingerprinting via doc-image presence; SVG <use> href=data:image/svg+xml nested-SVG gadget (Rails ActionView sanitize); data:image/svg+xml base64 URI accepted as RTE image src (executes on direct open, not in <img>); SMIL <animate attributeName='xlink:href' from='javascript:...' to='&'> animation-based XSS shape; sanitizer comment-breakout closing sequence //[\"'`-->]]>] and parser-context wrappers (<svg><style><h1/> prefix smuggling a stripped tag); served .svg reflecting attacker content = same-origin script execution context",
 		"hidden-DOM header-debug leak battery: debug/error pages that DOM-reflect request headers (including HttpOnly session cookies) into a hidden element \u2014 force the debug dump with a custom header plus an error/404 trigger, confirm with a distinctive custom header echoed into the DOM, and report the HttpOnly-cookie exposure surface (DOM-readable cookie data that bypasses the HttpOnly flag)\"",
 		"Array-indexed multipart stored-XSS sink: multipart/form-data fields named with an ARRAY index (files[0].name / profile[picture] / avatar[path]) \u2014 servers index parts by parse order or numeric key, store the raw value, and re-render it in the file picker listing / profile preview without encoding; test a poisoned array index in a multipart upload whose filename/value is reflected in subsequent HTML (stored XSS with a field-name shape that single-value fuzzers never generate)",
+		"Cookie-bombing / cookie-jar-overflow stored-XSS chain: flood 50-100 cookies (same-name or distinct-name) onto the child/parent domain so the browser's cookie-jar eviction/jitter reorders the jar \u2014 the OVERFLOWING cookie value survives into subsequent requests and lands reflected in an HTML context (distinct from plain reflected XSS: the poisoning corrupts the jar state of later requests, not the current one); audit how the app reads cookies across requests and whether an overflown jar value reaches a reflect/store sink",
 		],
-		techniques: ["bb_wayback_urls (find params)", "burp collaborator", "XSS hunter", "CSP evaluator", "gau", "gf xss", "Gxss", "kxss", "dalfox", "httpx-toolkit -ct", "stored-XSS grep | nuclei critical,high", "widget macro sub-param", "PAT token minting", "serialized UI-state stored XSS", "sanitizer parser-differential", "JSONP closure-breakout", "template-literal backtick payloads", "path-segment reflection", "CSP host-allowlist attacker-influence audit", "CSP-bypass concrete-gadget battery", "interaction-free event-handler payload grammars", "sink-surface & delivery-differential battery", "javascript:-scheme filter-evasion battery (case/comment/newline, base-href click-XSS, SVG animate, Textile parser)", "CSP nonce/token & script-channel bypass battery (nonce theft/reuse, import data:, srcdoc, githack traversal)", "stored-XSS second-renderer & cross-app data-flow battery (compose re-render, widget embed, cross-tenant)", "attribute-level & event-delegation injection battery (class-name delegation, onbeforescriptexecute, cookie-name)", "CDN-edge reflection & ARL origin-selection inflection (Akamai ARL path-prefix /7/0/33/1d/, goarl/akamai-arl-hack)", "SVG <use>/xlink:href external-resource sanitizer-gadget battery (data: nested-SVG, allowlist survival, image-pipeline SSRF)", "JSONP data-exfil/hijack battery (script-tag authenticated-endpoint fetch, no-CORS privacy-gate bypass, expired-domain JSONP hijack)", "SVG attack-surface battery (xlink:href pipeline SSRF + Is-Picture-Present file-presence oracle, <use> nested-SVG gadget, data: RTE src, SMIL animate XSS, comment-breakout sequence, parser-context wrappers, .svg same-origin render context)", "hidden-DOM header-debug leak battery (debug/error page DOM-reflecting request headers incl. HttpOnly cookies; distinctive-header confirmation)", "array-indexed multipart stored-XSS sink (files[0].name / profile[picture] indexed-part upload re-rendered in file picker)"]
+		techniques: ["bb_wayback_urls (find params)", "burp collaborator", "XSS hunter", "CSP evaluator", "gau", "gf xss", "Gxss", "kxss", "dalfox", "httpx-toolkit -ct", "stored-XSS grep | nuclei critical,high", "widget macro sub-param", "PAT token minting", "serialized UI-state stored XSS", "sanitizer parser-differential", "JSONP closure-breakout", "template-literal backtick payloads", "path-segment reflection", "CSP host-allowlist attacker-influence audit", "CSP-bypass concrete-gadget battery", "interaction-free event-handler payload grammars", "sink-surface & delivery-differential battery", "javascript:-scheme filter-evasion battery (case/comment/newline, base-href click-XSS, SVG animate, Textile parser)", "CSP nonce/token & script-channel bypass battery (nonce theft/reuse, import data:, srcdoc, githack traversal)", "stored-XSS second-renderer & cross-app data-flow battery (compose re-render, widget embed, cross-tenant)", "attribute-level & event-delegation injection battery (class-name delegation, onbeforescriptexecute, cookie-name)", "CDN-edge reflection & ARL origin-selection inflection (Akamai ARL path-prefix /7/0/33/1d/, goarl/akamai-arl-hack)", "SVG <use>/xlink:href external-resource sanitizer-gadget battery (data: nested-SVG, allowlist survival, image-pipeline SSRF)", "JSONP data-exfil/hijack battery (script-tag authenticated-endpoint fetch, no-CORS privacy-gate bypass, expired-domain JSONP hijack)", "SVG attack-surface battery (xlink:href pipeline SSRF + Is-Picture-Present file-presence oracle, <use> nested-SVG gadget, data: RTE src, SMIL animate XSS, comment-breakout sequence, parser-context wrappers, .svg same-origin render context)", "hidden-DOM header-debug leak battery (debug/error page DOM-reflecting request headers incl. HttpOnly cookies; distinctive-header confirmation)", "array-indexed multipart stored-XSS sink (files[0].name / profile[picture] indexed-part upload re-rendered in file picker)",
+		"cookie-bombing cookie-jar overflow battery (jitter/eviction-reorder poison of subsequent-request jar state -> reflected XSS via overflown cookie)"]
 	},
 	{
 		slug: "css-injection",
@@ -1130,8 +1132,10 @@ const CHECKLIST = [
 		"PDF.js / in-page JS-renderer CVE shelf: fingerprint the in-page document renderer (PDF.js version, viewer URL probes pdfjs/web/viewer.html?file=) then battery its CVE shelf (PDF.js CVE-2018-5158 crafted-PDF XSS payload; PDF-embedded-JS weaponization \u2014 JavaScript Action entries inside the PDF executed by the renderer); test any third-party in-page renderer (marked.js, highlight.js, mathjax, ckeditor renderers) for known-CVE XSS/RCE with crafted input documents; distinct from the headless-Chromium side (r31) \u2014 this is the CLIENT-SIDE renderer CVE shelf\"",
 		"Grafana snapshot IDOR battery: /api/snapshots, /api/snapshots-delete, /dashboard/snapshot \u2014 enumerate with lowest-key walk (sequential snapshot names/ids); watch public_mode config flag: it can FLIP unauth-view into unauth-delete (config-dependent severity) \u2014 test delete endpoints with the same keys that were viewable, and diff behavior across config states\"",
 		"Esri ArcGIS REST MapServer SQL surface battery: /rest/services/<name>/MapServer/<n>/query and /FeatureServer endpoints accept a 'where' clause, 'havingClause' (dynamic layers), 'orderByFields' and 'outFields', and can be switched to raw SQL via sqlFormat=none \u2014 test where=1=1, boolean algebra in havingClause, error-based/stacked probes and column enumeration through outFields for product-specific SQL injection; also probe unsecured GIS service exposure (unauthenticated survey/aggregate data, layer metadata, token-free feature queries) as a data-exposure finding\"",
+		"EIP-2718 typed-transaction/receipt decoding audit (chain node / indexer / explorer / scanner class): a system that parses legacy vs type-2 typed envelopes (EIP-1559 dynamic-fee, EIP-4844 blobs) by fixed offsets, or reads tx.type / receipt status from the WRONG envelope shape, mis-decodes proofs, deposit/withdrawal records and replay-guards across fork-era tx forms \u2014 same logical tx encoded two ways = duplicate processing or missed dedup; feed mixed legacy/typed RLP receipt batches through the decoder and diff the parsed tx.type / status / logsBloom fields against the canonical RLP parse",
 		],
-		techniques: ["x-middleware-subrequest + x-middleware-rewrite probes", "coffinxp nuclei-templates (nextjs-middleware-cache.yaml)", "Grafana icon_hash 2123863676 / title dorks", "CVE-2025-29927 / CVE-2025-4123 nuclei templates", "Atlassian OGNL endpoint matrix", "Oracle Forms WebUtil battery", "nginx Range overflow CVE-2017-7529", "firmware appliance CVE cross-ref", "Cisco ASA +CSCOU+/../+CSCOE+ 0296 battery", "jQuery<1.12 XHR auto-exec", "patch-diff variant hunting", "Tomcat default-install battery", "Windows LPE chain (cfg.xml ACL -> PrintSpoofer)", "framework/product CVE shelf battery (Rails/Jira/Struts/WSO2/Rocket.Chat)", "server-infra & dependency CVE battery", "Apache Solr admin-surface battery", "product-specific pre-auth RCE/file-read/helper-argv recipes", "appliance / SSL-VPN CVE shelf (Ivanti, ASA 3452, Array, GitLab 7028)", "Rails/Rack deep-CVE battery (ActiveStorage/i18n/ActionText/Rack-ReDoS)", "legacy client-side lib CVE shelf (jQuery/Bootstrap/AngularJS 1.x)", "Apache Airflow & Tomcat CVE battery (example-DAG RCE, DAG-ACL/wildcard, trigger CSRF, partial-PUT)", "legacy web-server & mailer exploit recipes (php-fpm 11043, ZendMail sendmail, Telerik dp_crypto, XMLDecoder, mod_proxy unix:, cPanel, QUIC)", "Node.js permission-model bypass battery (inspector CVE-2023-30587, fs.openAsBlob/fchown/process.report, AF_UNIX, createRequire)", "interpreter/VM sandbox-escape primitives (mruby memory-safety, BD-J classloading, TIOCSTI, chrome:// IPC)", "SSH/TLS protocol-level CVE battery (Terrapin kex-strict, ssh2-enum-algos, Heartbleed)", "Framework-CVE shelf additions (Jira OAuth consumerUri SSRF, BMC Remedy, Log4Shell, Rack multipart ReDoS, Ruby URI parser differential)", "runtime host-check bypass & debugger-assisted sandbox-escape battery (macOS 0.0.0.0/.local mDNS inspector bind, V8-inspector conditional-breakpoint state flip)", "embedded/IoT device web-UI feature-boundary audit (unauth vs auth state-changing features, XSS/CSRF -> full device takeover)", "headless-Chromium/PDF-renderer RCE battery (--no-sandbox audit, bundled-Chrome CVE history, HTMLi->render chain, print/PDF-export XSS sink, save->refresh render trigger)", "PDF.js/in-page JS-renderer CVE shelf (viewer fingerprint, CVE-2018-5158 crafted-PDF XSS, PDF-embedded-JS weaponization)", "Grafana snapshot IDOR battery (/api/snapshots lowest-key walk, public_mode unauth-view -> unauth-delete flip)", "Esri ArcGIS REST MapServer SQL surface battery (where/havingClause + sqlFormat=none, /MapServer/<n>/query + /FeatureServer, unsecured GIS service exposure)"]
+		techniques: ["x-middleware-subrequest + x-middleware-rewrite probes", "coffinxp nuclei-templates (nextjs-middleware-cache.yaml)", "Grafana icon_hash 2123863676 / title dorks", "CVE-2025-29927 / CVE-2025-4123 nuclei templates", "Atlassian OGNL endpoint matrix", "Oracle Forms WebUtil battery", "nginx Range overflow CVE-2017-7529", "firmware appliance CVE cross-ref", "Cisco ASA +CSCOU+/../+CSCOE+ 0296 battery", "jQuery<1.12 XHR auto-exec", "patch-diff variant hunting", "Tomcat default-install battery", "Windows LPE chain (cfg.xml ACL -> PrintSpoofer)", "framework/product CVE shelf battery (Rails/Jira/Struts/WSO2/Rocket.Chat)", "server-infra & dependency CVE battery", "Apache Solr admin-surface battery", "product-specific pre-auth RCE/file-read/helper-argv recipes", "appliance / SSL-VPN CVE shelf (Ivanti, ASA 3452, Array, GitLab 7028)", "Rails/Rack deep-CVE battery (ActiveStorage/i18n/ActionText/Rack-ReDoS)", "legacy client-side lib CVE shelf (jQuery/Bootstrap/AngularJS 1.x)", "Apache Airflow & Tomcat CVE battery (example-DAG RCE, DAG-ACL/wildcard, trigger CSRF, partial-PUT)", "legacy web-server & mailer exploit recipes (php-fpm 11043, ZendMail sendmail, Telerik dp_crypto, XMLDecoder, mod_proxy unix:, cPanel, QUIC)", "Node.js permission-model bypass battery (inspector CVE-2023-30587, fs.openAsBlob/fchown/process.report, AF_UNIX, createRequire)", "interpreter/VM sandbox-escape primitives (mruby memory-safety, BD-J classloading, TIOCSTI, chrome:// IPC)", "SSH/TLS protocol-level CVE battery (Terrapin kex-strict, ssh2-enum-algos, Heartbleed)", "Framework-CVE shelf additions (Jira OAuth consumerUri SSRF, BMC Remedy, Log4Shell, Rack multipart ReDoS, Ruby URI parser differential)", "runtime host-check bypass & debugger-assisted sandbox-escape battery (macOS 0.0.0.0/.local mDNS inspector bind, V8-inspector conditional-breakpoint state flip)", "embedded/IoT device web-UI feature-boundary audit (unauth vs auth state-changing features, XSS/CSRF -> full device takeover)", "headless-Chromium/PDF-renderer RCE battery (--no-sandbox audit, bundled-Chrome CVE history, HTMLi->render chain, print/PDF-export XSS sink, save->refresh render trigger)", "PDF.js/in-page JS-renderer CVE shelf (viewer fingerprint, CVE-2018-5158 crafted-PDF XSS, PDF-embedded-JS weaponization)", "Grafana snapshot IDOR battery (/api/snapshots lowest-key walk, public_mode unauth-view -> unauth-delete flip)", "Esri ArcGIS REST MapServer SQL surface battery (where/havingClause + sqlFormat=none, /MapServer/<n>/query + /FeatureServer, unsecured GIS service exposure)",
+		"EIP-2718 typed-envelope decoding battery (legacy vs type-2 RLP transaction/receipt pairs, tx.type / receipt-status misparse across fork-era shapes, duplicate-processing / missed-dedup on mixed encodings)"]
 	},
 	{
 		slug: "fix-bypass-retest",
@@ -2135,7 +2139,7 @@ const CHECKLIST = [
 		"Rewards/cycle-accounting battery: _notifyReward checkpoint ordering overwrites lastUpdateTime (rewards lost depending on deposit order), cycle-sync fairness (late-sync steals from honest users), dust-deposit + getReward re-notification dilution, gauge-deprecation registry desync, emissions-schedule dilution, protocol-fee double-use",
 		"Silent-failure / early-return + try/catch gas-swallowing battery: return-vs-revert on fund movement (early return sticks funds), 1/64 gas-retention rule (outer try/catch catches the inner call's reverted state), empty-revert-data bypassing catch blocks, unspent UniV3 refunds ignored",
 		"Oracle-callback lifecycle battery: VRF request-lifecycle fairness (underfunded -> delayed -> frontrun rigged draw), fulfillRandomWords must never revert (bricked randomness), callbackGasLimit exhaustion, accumulator reset between request and fulfill, same-block request+fulfill re-roll window",
-		"Hash-domain/dedup fragility battery: ballot/order digest includes mutable fields -> duplicate resubmission, keccak domain separation (same struct hashed in different contexts), timelock scheduling-hash must include eta, EIP-1052 codehash semantics (selfdestruct changes codehash), 4-byte selector collisions; EIP-2718 typed-transaction/receipt encoding \u2014 a system that parses legacy vs type-2 typed envelopes (EIP-1559 dynamic-fee, EIP-4844 blobs) by fixed offsets, or reads tx.type / receipt status from the WRONG envelope shape, mis-decodes proofs, deposit/withdrawal records and replay-guards across fork-era tx forms (same logical tx encoded two ways = duplicate processing or missed dedup)",
+		"Hash-domain/dedup fragility battery: ballot/order digest includes mutable fields -> duplicate resubmission, keccak domain separation (same struct hashed in different contexts), timelock scheduling-hash must include eta, EIP-1052 codehash semantics (selfdestruct changes codehash), 4-byte selector collisions)",
 		"Auction state-machine battery (brick-ability + griefing + MEV): single-instance/no-removal/monotonic-lot invariants (auction must not be brick-able by a bidder, lot must be monotonic, no removal or withdrawal-lock on settled lots), last-block sniping of fixed endBlock auctions + pause front-running + bid-withdrawal liquidity lock, fake-bid kick -> end.skip/pack/cash drain (kick anyone's fake bid then drain the settle), MEV sandwich of liquidation challenge auctions (frontrun repay + adjustPrice + backrun 1-wei bid to steal collateral), concurrent-auction shortfall diversion and isLastCollateral checks, address(0) recipient at auction start -> non-liquidatable vault, collateral-bundle mutability mid-auction (permissionless deposits into the vaultID manipulate the bid), flashloan transient supply passing the health check then withdrawing, weird-ERC20 refund DoS -> pull-over-push payout",
 		"Upgradeable/inheritance battery: base drift (extension inherits the Core contract instead of the full asset - missing functions, storage and access control), missing __X_init chain (__Governor_init/__EIP712_init/__ERC721_init omitted -> uninitialized inherited state), initializer vs onlyInitializing modifier usage, storage-gap __gap[50] collisions across the inheritance chain, re-callable initialize (double-init reconfigures the contract), EIP-1822/EIP-1967 proxy conformance (implementation slot, admin slot, constructor-vs-initializer), msg.value not forwarded through delegatecall (value lost in proxy calls)",
 		"Pause/circuit-breaker coverage sweep: inherited-but-unwired Pausable (pause() exists but whenNotPaused never gates fund movement -> dead control), whenNotPaused missing on fund-moving/queue-processing functions, pause must NOT gate liquidations (paused market blocks liquidators -> bad debt accrues), pause must NOT lock user funds (claim/collect/withdraw still callable), pause + renouncePauser brick (irreversible DoS), role renunciation finality (renounced roles can't be re-granted -> permanent brick), pause-freeze rug (owner pauses then drains)",
@@ -3242,7 +3246,7 @@ const TOOLS = [
 			try {
 				const base = normalizeUrl(args.url);
 				const basePath = (() => { try { return new URL(base).pathname.replace(/\/$/, ""); } catch { return ""; } })();
-				const host = (() => { try { return new URL(base).host; } catch { return ""; } })();
+				const origin = (() => { try { return new URL(base).origin; } catch { return ""; } })();
 				const paths = [
 					"/actuator", "/actuator/env", "/actuator/env/{property}", "/actuator/health",
 					"/actuator/info", "/actuator/configprops", "/actuator/beans", "/actuator/mappings",
@@ -3261,11 +3265,11 @@ const TOOLS = [
 				const seen = new Set();
 				const probe = async (path) => {
 					const p = basePath + path;
-					const full = host + p;
+					const full = origin + p;
 					if (seen.has(full)) return;
 					seen.add(full);
 					const r = await fetchWithHeader(
-						base.replace(/\/$/, "") + p,
+						full,
 						exec,
 						"x-forwarded-for",
 						"127.0.0.1",
@@ -5064,24 +5068,33 @@ const TOOLS = [
 			try {
 				const u = new URL(normalizeUrl(args.url));
 				const junkPaths = ["/" + Math.random().toString(36).slice(2) + ".env", "/" + Math.random().toString(36).slice(2) + "/", "/does-not-exist-" + Math.random().toString(36).slice(2) + ".txt", "/" + Math.random().toString(36).slice(2) + ".git/HEAD"];
+				// 12KB read cap: large enough that real soft-404 pages and real exposures are
+				// almost never both truncated; when either side hits the cap, size equality no
+				// longer proves similarity - fall back to truncated-content byte equality.
+				const CAP = 12000;
 				async function probe(path) {
 					let status = 0;
 					let body = "";
 					try {
 						const { res } = await fetchRes(u.origin + path, exec, { budget: 5000 });
 						status = res.status;
-						body = await readLimited(res, 2000);
+						body = await readLimited(res, CAP);
 					} catch {
 						status = 0;
 					}
-					return { status, size: body.length, body };
+					return { status, size: body.length, body, truncated: body.length === CAP };
 				}
 				const cand = await probe(u.pathname + u.search);
 				out.candidate = { status: cand.status, size: cand.size, marker: /\b(APP_KEY|DB_PASSWORD|SECRET|TOKEN|ref:|\[core\]|DIRC)\b/i.test(cand.body) ? "credential/git marker present" : "" };
 				const junkRes = await mapPool(junkPaths, 4, (jp) => probe(jp));
 				for (let i = 0; i < junkPaths.length; i++) out.junk.push({ path: junkPaths[i], status: junkRes[i].status, size: junkRes[i].size });
 				const anyJunk200 = out.junk.some((j) => j.status === 200);
-				const sameAsJunk = anyJunk200 && out.junk.some((j) => j.status === cand.status && Math.abs(j.size - cand.size) / Math.max(cand.size, 1) < 0.15);
+				const sameAsJunk = anyJunk200 && junkRes.some((j) => {
+					if (j.status !== cand.status) return false;
+					if (!cand.truncated && !j.truncated) return Math.abs(j.size - cand.size) / Math.max(cand.size, 1) < 0.15;
+					// one or both hit the read cap: sizes are capped, not real - require byte-identical truncated content
+					return cand.truncated && j.truncated && cand.size === j.size && hashText(cand.body) === hashText(j.body);
+				});
 				if (cand.status === 0) out.verdict = "PROBE ERROR — candidate fetch failed (network/blocked); cannot judge soft-404, re-run or check connectivity";
 				else if (cand.status !== 200) out.verdict = `candidate returns HTTP ${cand.status} — not a soft-404 case; if it was 200 in a prior scan re-check (build rotation, auth-gated)`;
 				else if (sameAsJunk) out.verdict = "SOFT-404 LIKELY — candidate 200 body size matches junk-path 200s on same host; treat as false positive unless a distinguishable marker is present";
@@ -6619,7 +6632,8 @@ const TOOLS = [
 				} else if (isUuid) {
 					push("zero-uuid", "00000000-0000-0000-0000-000000000000", "all-zero UUID — nil object handling");
 					push("flip-segment", id.slice(0, 14) + "ffff" + id.slice(18), "mutate a UUID segment — sibling guess");
-					const mut = id.slice(0, 24) + (parseInt(id.slice(24), 16) ^ 1).toString(16).padStart(12, "0");
+					const lastNibble = parseInt(id.slice(35), 16);
+					const mut = id.slice(0, 35) + (lastNibble ^ 1).toString(16);
 					push("last-nibble-xor", mut, "flip last hex nibble — adjacent UUID sibling");
 					push("same-length-random", Array.from({ length: 36 }, () => "0123456789abcdef"[Math.floor(Math.random() * 16)]).join(""), "random UUID — unidentified object guess");
 				} else {
@@ -7060,8 +7074,27 @@ function withErrorContract(def) {
 		const baseRender = def.output.render;
 		def.output.render = (args, v) => {
 			const base = baseRender(args, v);
-			if (v && v.error && typeof base === "string" && !base.includes(String(v.error))) {
-				return base.replace(/\n?$/, "") + "\n⚠ error: " + v.error;
+			if (!v || !v.error) return base;
+			const errText = String(v.error);
+			const hasErr = (b) =>
+				Array.isArray(b)
+					? b.some((blk) => blk && typeof blk.text === "string" && blk.text.includes(errText))
+					: typeof b === "string" && b.includes(errText);
+			if (hasErr(base)) return base;
+			const suffix = "\n⚠ error: " + errText;
+			if (Array.isArray(base)) {
+				if (base.length === 0) return [{ type: "text", text: suffix.replace(/^\n/, "") }];
+				const last = base[base.length - 1];
+				if (last && typeof last.text === "string") {
+					if (last.text.endsWith("...(truncated)")) {
+						// keep the truncation marker visible; splice the error in front of it
+						last.text = last.text.slice(0, -"(truncated)".length - 4) + suffix + "\n...(truncated)";
+					} else {
+						last.text = last.text.replace(/\n?$/, "") + suffix;
+					}
+				}
+			} else if (typeof base === "string") {
+				return base.replace(/\n?$/, "") + suffix;
 			}
 			return base;
 		};
