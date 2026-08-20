@@ -272,7 +272,8 @@ async function enumSubdomains(domain, exec, cap) {
 		}
 	}));
 	const sorted = [...set].sort();
-	return { subdomains: sorted.slice(0, cap), sources, errors: errors.slice(0, 8) };
+	const truncated = sorted.length > cap;
+	return { subdomains: sorted.slice(0, cap), truncated, sources, errors: errors.slice(0, 8) };
 }
 
 // ---------------------------------------------------------------------------
@@ -281,7 +282,9 @@ async function enumSubdomains(domain, exec, cap) {
 
 /** One HTTP(S) attempt at host:port; never throws. */
 async function probeOnce(host, scheme, port, exec) {
-	const url = `${scheme}://${host}:${port}/`;
+	// IPv6 literals must be bracketed in URLs: http://[2001:db8::1]:8080/ — unbracketed fetch dies
+	const urlHost = host.includes(":") ? `[${host}]` : host;
+	const url = `${scheme}://${urlHost}:${port}/`;
 	const rec = { scheme, port, status: 0, ok: false, url, finalUrl: "", title: "", server: "", error: "" };
 	try {
 		const { res } = await fetchRes(url, exec, { budget: 10000, redirect: "follow" });
@@ -2719,12 +2722,13 @@ const TOOLS = [
 					subdomains: { type: "array", items: { type: "string" } },
 					count: { type: "integer" },
 					sources: { type: "array", items: { type: "string" } },
-					errors: { type: "array", items: { type: "string" } }
+					errors: { type: "array", items: { type: "string" } },
+					truncated: { type: "boolean", description: "true when enumeration found more than the 500 cap — the returned list is a slice" }
 				},
 				required: ["domain", "subdomains", "count", "sources", "errors"]
 			},
 			render: (_args, v) => renderLines(`🔎 bb_enum_subdomains ${v.domain}`, [
-				`count: ${v.count} (sources: ${v.sources.join(", ") || "none"})`,
+				`count: ${v.count} (sources: ${v.sources.join(", ") || "none"})${v.truncated ? " — ⚠ capped at 500, list is a slice" : ""}`,
 				...(v.errors.length ? [`errors: ${v.errors.join(" | ")}`] : []),
 				...v.subdomains.map((s) => `  - ${s}`)
 			])
@@ -2734,8 +2738,8 @@ const TOOLS = [
 		async execute(args, exec) {
 			const domain = normalizeDomain(String(args.domain ?? ""));
 			if (!DOMAIN_RE.test(domain)) throw new Error(`invalid domain: "${domain}" — use a bare hostname like example.com`);
-			const { subdomains, sources, errors } = await enumSubdomains(domain, exec, 500);
-			return { domain, subdomains, count: subdomains.length, sources, errors };
+			const { subdomains, sources, errors, truncated } = await enumSubdomains(domain, exec, 500);
+			return { domain, subdomains, count: subdomains.length, sources, errors, truncated };
 		}
 	},
 	{
@@ -2775,9 +2779,10 @@ const TOOLS = [
 				},
 				required: ["host", "results"]
 			},
-			render: (_args, v) => renderLines(`🧭 bb_probe_http ${v.host}`, v.results.map((r) =>
-				`  ${r.scheme}://${v.host}:${r.port} → ${r.status}${r.ok ? " ok" : ""}${r.title ? ` — ${r.title}` : ""}${r.server ? ` [${r.server}]` : ""}${r.finalUrl && r.finalUrl !== r.url ? ` → ${r.finalUrl}` : ""}${r.error ? ` (${r.error})` : ""}`
-			))
+			render: (_args, v) => renderLines(`🧭 bb_probe_http ${v.host}`, v.results.map((r) => {
+				const dispHost = String(v.host).includes(":") ? `[${v.host}]` : v.host;
+				return `  ${r.scheme}://${dispHost}:${r.port} → ${r.status}${r.ok ? " ok" : ""}${r.title ? ` — ${r.title}` : ""}${r.server ? ` [${r.server}]` : ""}${r.finalUrl && r.finalUrl !== r.url ? ` → ${r.finalUrl}` : ""}${r.error ? ` (${r.error})` : ""}`;
+			}))
 		},
 		timeoutMs: 90000,
 		isConcurrencySafe: () => true,
@@ -2789,10 +2794,17 @@ const TOOLS = [
 			host = host.toLowerCase().replace(/\/+$/, "");
 			if (!host) throw new Error("host is required");
 			if (host.length > 253 || /\s/.test(host)) throw new Error(`invalid host: "${host.slice(0, 60)}"`);
-			// host:port embedded in the host string (e.g. example.com:8080) — extract and merge into ports
+			// host:port embedded in the host string (e.g. example.com:8080, [2001:db8::1]:8443) —
+			// extract and merge into ports. The lazy /^(.*?):(\d{1,5})$/ would mangle IPv6 literals
+			// (2001:db8::1 -> host "2001:db8:" port 1), so a bare host:port parse is only allowed
+			// when the host part is bracket-free AND contains no other colons.
 			let hostPort = null;
-			const hm = host.match(/^(.*?):(\d{1,5})$/);
-			if (hm) { host = hm[1]; hostPort = Number(hm[2]); }
+			const v6m = host.match(/^\[([0-9a-fA-F:.]+)\](?::(\d{1,5}))?$/);
+			if (v6m) { host = v6m[1]; hostPort = v6m[2] ? Number(v6m[2]) : null; }
+			else {
+				const hm = host.match(/^([^:]+):(\d{1,5})$/);
+				if (hm) { host = hm[1]; hostPort = Number(hm[2]); }
+			}
 			const ports = normPorts(args.ports);
 			const finalPorts = hostPort !== null ? uniq([hostPort, ...ports]) : ports;
 			const attempts = [];
@@ -2981,7 +2993,8 @@ const TOOLS = [
 					},
 					findings: { type: "array", items: { type: "object", properties: { type: { type: "string" }, target: { type: "string" }, detail: { type: "string" } } } },
 					warnings: { type: "array", items: { type: "string" } },
-					durationMs: { type: "integer" }
+					durationMs: { type: "integer" },
+					truncated: { type: "boolean", description: "true when any stage hit its cap (picked hosts / liveHosts / findings / warnings) or the run hit the aggregate deadline — results are partial, see warnings" }
 				},
 				required: ["domain", "subdomains", "subdomainCount", "liveHosts", "findings", "warnings", "durationMs"]
 			},
@@ -2992,6 +3005,7 @@ const TOOLS = [
 					...(v.liveHosts.length ? ["", ...v.liveHosts.map((h) => `  ● ${h.host} (${h.status})${h.server ? ` [${h.server}]` : ""}${h.title ? ` — ${h.title}` : ""}${h.tech.length ? ` tech: ${h.tech.join(", ")}` : ""}`)] : []),
 					...(v.findings.length ? ["", `findings (${v.findings.length}):`, ...v.findings.map((f) => `  ⚠ ${f.type} ${f.target} — ${f.detail}`)] : []),
 					...(v.warnings.length ? ["", `warnings:`].concat(v.warnings.map((w) => `  ! ${w}`)) : []),
+					v.truncated ? "⚠ truncated run — results are partial, see warnings" : "",
 					`duration: ${v.durationMs}ms`
 				];
 				return renderLines(`🎯 bb_recon ${v.domain}`, lines);
@@ -3010,15 +3024,22 @@ const TOOLS = [
 			candidates.sort((a, b) => a.length - b.length || a.localeCompare(b));
 			const picked = candidates.slice(0, 20);
 			if (picked.length === 0) {
-				return { domain, subdomains: [], subdomainCount: 0, liveHosts: [], findings: [], warnings: warnings.slice(0, 20), durationMs: Date.now() - start };
+				return { domain, subdomains: [], subdomainCount: 0, liveHosts: [], findings: [], warnings: warnings.slice(0, 20), durationMs: Date.now() - start, truncated: false };
 			}
+			// aggregate deadline: staging sum (enum 45s ∥ + 80 probes ~126s stall-stacked + tech ~46s + headers ~23s)
+			// approaches timeoutMs; deadlineExec bounds the whole run so it returns partial data instead of being killed
+			const de = deadlineExec(exec, 200000);
+			const truncated = candidates.length > picked.length;
+			if (truncated) warnings.push(`subdomain pool truncated: probing top ${picked.length} of ${candidates.length} candidates`);
 			const attempts = [];
 			for (const host of picked) {
 				for (const scheme of ["http", "https"]) {
 					for (const port of [80, 443]) attempts.push({ host, scheme, port });
 				}
 			}
-			const probeResults = await mapPool(attempts, 12, (a) => probeOnce(a.host, a.scheme, a.port, exec));
+			const probeResults = await mapPool(attempts, 12, (a) => probeOnce(a.host, a.scheme, a.port, de));
+			const probeFails = probeResults.filter((r) => r.status === 0 && r.error).length;
+			if (probeFails > 0) warnings.push(`${probeFails} of ${attempts.length} probe attempts errored (network/blocked/deadline) — live-host list may be incomplete`);
 			const byHost = new Map();
 			for (let i = 0; i < attempts.length; i++) {
 				const a = attempts[i];
@@ -3040,12 +3061,12 @@ const TOOLS = [
 			liveHosts.sort((a, b) => a.host.length - b.host.length || a.host.localeCompare(b.host));
 			const techJobs = liveHosts.slice(0, 10).map((h) => ({ host: h.host, url: h.url }));
 			const techResults = await mapPool(techJobs, 8, async ({ host, url }) => {
-				const t = await techDetect(url, exec);
+				const t = await techDetect(url, de);
 				return { host, tech: t.tech.map((x) => x.name), error: t.error };
 			});
 			const headJobs = liveHosts.slice(0, 6).map((h) => ({ host: h.host, url: h.url }));
 			const headResults = await mapPool(headJobs, 8, async ({ host, url }) => {
-				const s = await securityHeaders(url, exec);
+				const s = await securityHeaders(url, de);
 				return { host, s };
 			});
 			for (const t of techResults) {
@@ -3060,6 +3081,11 @@ const TOOLS = [
 				for (const l of s.leaks) findings.push({ type: "header-leak", target: hr.host, detail: `${l.name}: ${l.value}` });
 				for (const c of s.cookieFlags) if (c.missing.length) findings.push({ type: "cookie-flag", target: hr.host, detail: `${c.name} missing ${c.missing.join(",")}` });
 			}
+			const liveHostsTrunc = liveHosts.length > 25;
+			const findingsTrunc = findings.length > 80;
+			if (liveHostsTrunc) warnings.push("liveHosts truncated at 25 for tech/header analysis");
+			if (findingsTrunc) warnings.push("findings truncated at 80");
+			if (Date.now() - start >= 190000) warnings.push("ran into the 200s aggregate deadline — results are partial (fetches after the deadline were aborted)");
 			return {
 				domain,
 				subdomains: subdomains.slice(0, 100),
@@ -3067,7 +3093,8 @@ const TOOLS = [
 				liveHosts: liveHosts.slice(0, 25),
 				findings: findings.slice(0, 80),
 				warnings: warnings.slice(0, 20),
-				durationMs: Date.now() - start
+				durationMs: Date.now() - start,
+				truncated: truncated || liveHostsTrunc || findingsTrunc || Date.now() - start >= 190000
 			};
 		}
 	},
@@ -3127,11 +3154,11 @@ const TOOLS = [
 	},
 	{
 		name: "bb_source_audit",
-		description: "Source-code audit methodology (segregated from web bug bounty): 7-step audit flow, bug-class priority order, and per-language checklists + grep patterns. Optional language filter (c-cpp, rust, go, js-ts; substring match) returns just that language's focused checks.",
+		description: "Source-code audit methodology (segregated from web bug bounty): 8-step audit flow, bug-class priority order, and per-language checklists + grep patterns. Optional language filter (c-cpp, rust, go, js-ts; substring match) returns just that language's focused checks.",
 		parameters: {
 			type: "object",
 			additionalProperties: false,
-			properties: { language: { type: "string", description: "Optional slug to focus: \"c\", \"cpp\", \"rust\", \"go\", \"js\", \"ts\"" } },
+			properties: { language: { type: "string", description: "Optional slug to focus: \"c-cpp\", \"rust\", \"go\", \"js-ts\" (substring match — \"c\" hits c-cpp, \"js\" hits js-ts)" } },
 			required: []
 		},
 		output: {
@@ -3567,15 +3594,19 @@ const TOOLS = [
 			try {
 				const domain = normalizeDomain(args.domain);
 				if (!DOMAIN_RE.test(domain)) throw new Error(`invalid domain: "${domain}" — use a bare hostname like example.com`);
-				const [spf, otx] = await Promise.all([spfTxt(domain, exec), otxUrls(domain, exec, 150)]);
+				// aggregate deadline: SPF chain is capped at 12 seq resolves x 12s = 144s worst + otx 25s + 40s probes
+				// -> deeper than timeoutMs 90s. deadlineExec bounds the whole run so it returns partial data.
+				const de = deadlineExec(exec, 80000);
+				const [spf, otx] = await Promise.all([spfTxt(domain, de), otxUrls(domain, de, 150)]);
 				out.spfIps = spf.ips.slice(0, 25);
 				out.spfIncludes = spf.includes.slice(0, 12);
 				out.otxHosts = otx.hosts.slice(0, 30);
 				if (spf.error) out.note = "SPF error: " + spf.error;
 				if (otx.error) out.note += (out.note ? "; OTX error: " : "OTX error: ") + otx.error;
 				const candidates = out.spfIps.slice(0, 10);
-				const results = await mapPool(candidates, 4, (ip) => probeTitle(ip, exec, domain));
+				const results = await mapPool(candidates, 4, (ip) => probeTitle(ip, de, domain));
 				for (const r of results) if (r) out.probes.push({ host: r.host, status: r.status, title: r.title });
+				if (spf.error && /truncated at 12/i.test(spf.error)) out.note += (out.note ? "; " : "") + "SPF chain hit the width cap — ip4/ip6 set may be incomplete";
 			} catch (e) {
 				out.error = shortErr(e);
 			}
@@ -7193,7 +7224,7 @@ const GUIDANCE = [
 	"- bb_cache_key_probe(url) — test whether host/URL headers are cache-keyed and detect unkeyed-header cache poisoning primitives.",
 	"- bb_ratelimit_classify(login or signup URL) — classify login brute-force protection: hard limit, soft/suspicious, lockout or no rate limiting.",
 	"- bb_nosqli_auth_probe(login URL) — test NoSQL auth bypass operators ($ne/$gt/$regex, array-wrap, dot-injection, __proto__) — ACTIVE: authorized targets only, never other users' data.",
-	"- bb_source_audit(language?) — SEGREGATED source-code audit methodology (C/C++, Rust, Go, JS/TS): 7-step audit flow, bug-class priority order (parsers, memory mgmt, IPC/network, privilege boundaries, error handling, concurrency), per-language checks + grep patterns (memcpy, unsafe, unwrap, unsafe.Pointer, eval, __proto__, ...). Pass a language slug for focused output.",
+	"- bb_source_audit(language?) — SEGREGATED source-code audit methodology (C/C++, Rust, Go, JS/TS): 8-step audit flow, bug-class priority order (parsers, memory mgmt, IPC/network, privilege boundaries, error handling, concurrency), per-language checks + grep patterns (memcpy, unsafe, unwrap, unsafe.Pointer, eval, __proto__, ...). Pass a language slug for focused output.",
 	"- bb_triage() — Rhat-scored bug triage workflow (bughunt obsidian bug-report template): score candidates with P(real_bug)/P(feasible)/P(reproducible)/P(new_root_cause)/expected_impact -> REPORT / INVESTIGATE / DISCARD; status tracking, finding classes (genuine vs design opinion vs style), SQLite concurrency audit checklist, report template fields.",
 	"Workflow: start a target with bb_recon(domain); drill into promising live hosts with bb_security_headers / bb_tech_detect / bb_probe_http; mine bb_wayback_urls for archived endpoints, IDs and params; use web_search for current techniques and bash for active PoCs. All sources are keyless and rate-limited — expect per-source errors and fall back gracefully. Triage every candidate with bb_triage BEFORE reporting (REPORT only high-Rhat: genuine + feasible + reproducible).",
 	"Engagement & ops (merged from bughunt rules): verify program scope BEFORE testing, never touch other users' data, report confirmed vulns within 24h. The shell is non-interactive: always use -y/--no-input flags, ssh -o BatchMode=yes, avoid vim/less/man/REPLs, pipe `yes` into anything that may prompt; prefer read/write/glob/grep tools over cat/find/grep.",
