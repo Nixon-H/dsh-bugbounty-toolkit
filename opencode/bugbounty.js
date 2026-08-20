@@ -1,6 +1,6 @@
 // dsh-bugbounty-toolkit — OpenCode adapter.
 //
-// Registers all 51 `bb_*` recon/finding tools from dsh-bugbounty plus a
+// Registers all 53 `bb_*` recon/finding tools from dsh-bugbounty plus a
 // keyless web search tool (Tavily keyless mode, no API key).
 //
 // Install locations:
@@ -220,6 +220,14 @@ const TOOL_ARGS = {
     method: tool.schema.string().optional().describe("HTTP method (default GET)"),
     body: tool.schema.string().optional().describe("Optional raw request body to swap IDs in and resend (default none)"),
     contentType: tool.schema.string().optional().describe("Content-Type for a body-bearing request (default application/json)"),
+  },
+  bb_xss_probe: {
+    url: tool.schema.string().describe("Full URL with at least one query param, e.g. https://target.com/search?q=test"),
+    param: tool.schema.string().optional().describe("Only test this param (default: all query params)"),
+  },
+  bb_ssrf_probe: {
+    url: tool.schema.string().describe("Full URL with a param that feeds a backend fetch, e.g. https://target.com/fetch?url=https://example.com"),
+    param: tool.schema.string().optional().describe("Only test this param (default: all query params)"),
   },
 };
 

