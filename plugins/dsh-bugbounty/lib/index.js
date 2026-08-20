@@ -4697,10 +4697,12 @@ const TOOLS = [
 		timeoutMs: 45000,
 		isConcurrencySafe: () => true,
 		async execute(args, exec) {
-			const domain = normalizeDomain(args.domain);
-			const limit = Math.min(Math.max(Number(args.limit) || 60, 1), 200);
-			const out = { domain, matches: [], by_extension: {}, summary: "", error: "" };
+			const out = { domain: String(args.domain || ""), matches: [], by_extension: {}, summary: "", error: "" };
 			try {
+				const domain = normalizeDomain(args.domain);
+				if (!DOMAIN_RE.test(domain)) throw new Error(`invalid domain: "${domain}" — use a bare hostname like example.com`);
+				out.domain = domain;
+				const limit = Math.min(Math.max(Number(args.limit) || 60, 1), 200);
 				const { urls, error } = await cdxUrls(domain, exec, { cap: 800 });
 				if (error) out.error = error;
 				const EXTS = ["xls", "xml", "json", "pdf", "sql", "doc", "docx", "pptx", "txt", "zip", "tar.gz", "tgz", "bak", "ost", "wim", "rar", "7z", "reg", "db", "jar", "war", "git", "gitignore", "py", "csv", "rtf", "env", "log", "lock", "key", "p12", "pem", "der", "csr", "conf", "cfg", "ini", "sqlite", "sqlcipher", "apk", "apkg", "whl", "deb", "rpm", "msi", "exe", "dll", "so", "sh", "mmdb", "accdb", "sqlite3", "db3", "dat", "bin", "hex", "backup"];
@@ -4906,7 +4908,10 @@ const TOOLS = [
 								body: q
 							});
 							status = resp.status;
-							body = await readLimited(resp, 3000);
+							// real introspection responses routinely exceed 3KB — truncating to 3000B zeroed
+							// type_count/has_mutations on large schemas (JSON.parse falls back to rawHit prefix);
+							// 262144B cap lets full schemas through while still bounding the read
+							body = await readLimited(resp, 262144);
 						} finally {
 							b.dispose();
 						}
@@ -5467,7 +5472,7 @@ const TOOLS = [
 				else if (tlsQ.value) out.findings.push("TLS-RPT present: " + tlsQ.value.slice(0, 60));
 				for (const sel of ["default", "google", "selector1", "s1", "k1", "dkim"]) {
 					const dkQ = await safe(sel + "._domainkey." + domain);
-					if (dkQ.error) { out.findings.push("DKIM " + sel + " lookup FAILED (" + dkQ.error + ")"); break; }
+					if (dkQ.error) { out.findings.push("DKIM " + sel + " lookup FAILED (" + dkQ.error + ")"); continue; } // flaky DoH on one selector must not kill the rest
 					if (dkQ.value) { out.dkim_selector = sel; out.findings.push("DKIM selector '" + sel + "' present: " + dkQ.value.slice(0, 60)); break; }
 				}
 				const errs = queries.filter((q) => q.error);
@@ -5534,7 +5539,6 @@ const TOOLS = [
 						};
 						out.realm = {
 							namespace_type: grab("NameSpaceType"),
-							name_space_type: grab("NameSpaceType"),
 							auth_url: grab("AuthURL"),
 							federation_protocol: grab("FederationProtocol"),
 							tenant_name: grab("TenantName"),
@@ -5647,7 +5651,6 @@ const TOOLS = [
 				for (const [h, rs] of Object.entries(grouped)) {
 					const hset = new Set(rs.map((r) => hashes.get(h + "\u0000" + r.value)));
 					const probeCache = rs.some((r) => isCacheHit(r.cache_headers));
-					const bodyReflect = rs.some((r) => r.cache_headers !== "-" && r.body_len > 0);
 					if (rs.length >= 2 && rs.every((r) => r.status && r.body_len > 0) && hset.size === 1 && sawCache && probeCache) {
 						out.unkeyed.push(h + " (identical body across different " + h + " values, cache layer in front AND probe responses cache-served — unkeyed header)");
 					}
