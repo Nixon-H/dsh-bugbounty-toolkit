@@ -3735,21 +3735,27 @@ const TOOLS = [
 			const out = { domain: String(args.domain || ""), endpoints: [], found: 0, note: "" };
 			try {
 				const domain = normalizeDomain(args.domain);
+				if (!DOMAIN_RE.test(domain)) throw new Error(`invalid domain: "${domain}" — use a bare hostname like example.com`);
 				const paths = [
 					"/swagger-ui.html", "/swagger-ui/index.html", "/swagger-ui/", "/swagger/index.html", "/swagger",
 					"/api-docs", "/v2/api-docs", "/v3/api-docs", "/openapi.json", "/openapi.yaml", "/openapi.yml",
 					"/swagger.json", "/api/swagger.json", "/api/swagger-ui.html", "/api/swagger-ui/", "/swagger-resources",
 					"/docs", "/documentation", "/api/docs", "/swagger-ui/dist/", "/apis/swagger", "/v1/api-docs",
 				];
+				// budget: 22 paths / conc 8 = 3 waves; fetch budget 5000 + up-to-8s readLimited stall
+				// => worst ~3 x 13s = 39s < 45s timeout (was 10000ms -> ~54s, overrun)
 				await mapPool(paths, 8, async (p) => {
 					try {
-						const { res } = await fetchRes("https://" + domain + p, exec, { budget: 10000 });
+						const { res } = await fetchRes("https://" + domain + p, exec, { budget: 5000 });
 						const body = await readLimited(res, 6000);
 						const ctype = res.headers.get("content-type") || "";
-						// cross-check: 2xx AND real spec body (not a catch-all HTML page) AND json/yaml content-type
+						// cross-check: 2xx AND real spec body (not catch-all HTML) AND json/yaml content-type.
+						// Anchored to the DOCUMENT ROOT — a bare "openapi" substring inside an error body
+						// (e.g. {"error":"openapi is not configured for this tenant"}) must NOT match.
+						const rootSpec = /^[\s\n]*[\[{]?[\s\n]*(?:"(?:openapi|swagger|swaggerVersion|swagger-ui|paths|components|definitions|info)"|(?:openapi|swagger)\s*:)/m;
 						const specish = res.status >= 200 && res.status < 300 &&
 							!/<\s*html/i.test(body) &&
-							/(swagger|openapi|"paths"|definitions|"components"|"swagger":\s*"2\.0")/i.test(body) && /(json|ya?ml)/i.test(ctype);
+							/(json|ya?ml)/i.test(ctype) && rootSpec.test(body);
 						out.endpoints.push({ path: p, status: res.status, ctype, size: body.length, spec: specish });
 					} catch {
 						out.endpoints.push({ path: p, status: 0, ctype: "", size: 0, spec: false });
@@ -3781,7 +3787,8 @@ const TOOLS = [
 				properties: {
 					domain: { type: "string" },
 					buckets: { type: "array", items: { type: "object", properties: { name: { type: "string" }, status: { type: "integer" }, listable: { type: "boolean" }, note: { type: "string" } }, required: ["name", "status", "listable", "note"], additionalProperties: false } },
-					open: { type: "array", items: { type: "string" } }
+					open: { type: "array", items: { type: "string" } },
+					note: { type: "string" }
 				},
 				required: ["domain", "buckets", "open"],
 			},
@@ -3807,18 +3814,25 @@ const TOOLS = [
 					"s3-" + d, "s3-" + stem, stem + "-s3", stem + "-bucket", stem + "-storage", stem + "-backup",
 					stem + "-files", stem + "-uploads", stem,
 				];
+				// budget: 27 names / conc 6 = 5 waves, 2 sequential forms per name.
+				// worst wall = ceil(27/6) x (2 forms x (fetchMs + up-to-8s stall)) — 5000ms budget
+				// => ~130s > 75s timeout. Scale fetch budget down and cap the body-read stall so
+				// 5 x (2 x (2500 + 4000)) = 65s < 75s even in the stall-stacked worst case.
+				const fetchMs = 2500;
 				await mapPool(names, 6, async (name) => {
 					const forms = ["https://" + name + ".s3.amazonaws.com/", "https://s3.amazonaws.com/" + name + "/"];
 					let merged = null;
 					for (const u of forms) {
 						try {
-							const { res } = await fetchRes(u, exec, { budget: 5000 });
-							const body = await readLimited(res, 1500);
+							const { res } = await fetchRes(u, exec, { budget: fetchMs });
+							const body = await readLimited(res, 1500, 4000);
 							const listable = res.status === 200 && /<ListBucketResult/i.test(body);
 							const note = res.status === 404 ? (body.includes("NoSuchBucket") ? "nonexistent" : "404") : body.includes("AccessDenied") ? "exists-private" : "exists";
 							if (merged) {
-								if (listable) merged.listable = true;
-								if (merged.note === "nonexistent" && note && note !== "nonexistent") { merged.note = note; merged.status = res.status; }
+								// a successful presence/listing result from ANY form overrides a 404 note
+								// (form-1 404-without-NoSuchBucket used to leave a stale "404" even when form-2 was live)
+								if (listable) { merged.listable = true; merged.status = res.status; merged.note = note; }
+								else if (note && note !== "nonexistent" && (merged.note === "404" || merged.note === "nonexistent")) { merged.note = note; merged.status = res.status; }
 								else if (note && !merged.note) merged.note = note;
 							} else {
 								merged = { name, status: res.status, listable, note };
@@ -4062,9 +4076,12 @@ const TOOLS = [
 			const out = { url: String(args.url || ""), baseline: 0, withHeader: 0, rewriteHeader: "", verdict: "inconclusive" };
 			try {
 				const base = normalizeUrl(args.url);
+				// worst: 2 sequential fetches x (10000ms budget + up-to-8s read stall) ~ 36s > 30s timeout
+				// -> aggregate deadline bounds the whole probe so it returns the base verdict instead of being killed
+				const de = deadlineExec(exec, 25000);
 				const get = async (headers) => {
 					try {
-						const { res } = await fetchRes(base, exec, { budget: 10000, headers });
+						const { res } = await fetchRes(base, de, { budget: 10000, headers });
 						const body = await readLimited(res, 4000);
 						return { status: res.status, rewrite: res.headers.get("x-middleware-rewrite") || "", body };
 					} catch {
@@ -4077,7 +4094,12 @@ const TOOLS = [
 				const t = await get({ "user-agent": UA, "x-middleware-subrequest": "middleware:middleware:middleware:middleware:middleware:middleware:middleware:middleware:middleware:middleware:middleware" });
 				out.withHeader = t.status;
 				const bodyDiffers = b.body && t.body && b.body !== t.body;
-				if (t.status === 200 && b.status >= 300 && b.status < 500) {
+				if (t.status === 0) {
+					out.verdict = "header probe errored; site may block it";
+				} else if (b.status === 0) {
+					// baseline fetch failed — absence of a 200-on-header signal is NOT proof the CVE is absent
+					out.verdict = "baseline request failed (network/WAF/deadline) — INCONCLUSIVE; cannot attest absence of CVE-2025-29927 (re-run or check the target manually)";
+				} else if (t.status === 200 && b.status >= 300 && b.status < 500) {
 					out.verdict = "LIKELY CVE-2025-29927 (bypass: " + b.status + " -> 200)";
 				} else if (b.status === 200 && t.status === 200 && bodyDiffers) {
 					out.verdict = "200 with header returns DIFFERENT content than 200 baseline — possible middleware-bypass serving protected content; verify the header-probe page shows admin-only data (common 200-vs-200 variant)";
@@ -4453,6 +4475,8 @@ const TOOLS = [
 				for (const [waf, ev] of sigs) if (ev) out.detected.push({ waf, evidence: ev });
 				// Incapsula is Imperva's CDN brand — never double-report from the same x-iinfo header
 				if (out.detected.some((d) => d.waf === "Imperva")) out.detected = out.detected.filter((d) => d.waf !== "Incapsula");
+				// Sucuri/other (server-header match) is the same product as the x-sucuri-id signature — dedupe
+				if (out.detected.some((d) => d.waf === "Sucuri")) out.detected = out.detected.filter((d) => d.waf !== "Sucuri/other");
 				if (/cloudflare/i.test(h("server")) && !out.detected.length) out.detected.push({ waf: "Cloudflare", evidence: "server header" });
 				if (/nginx/i.test(h("server")) && !out.detected.length) out.pageNote = "server: nginx — no WAF signature matched (plain origin or WAF-less edge)";
 				const tamperMap = {
@@ -4545,8 +4569,12 @@ const TOOLS = [
 					else if (t.acao === "*" && t.acac === "true") out.findings.push(`wildcard ACAO: * with credentials (${t.method}) — invalid per spec`);
 				}
 				const getTests = out.origins_tests.filter((t) => t.method === "GET");
-				if (getTests.some((t) => t.reflected) && !getTests.some((t) => /origin/i.test(t.vary))) {
-					out.findings.push("reflected ACAO without Vary: Origin — cacheable cross-origin responses");
+				// per-test check: a reflected GET WITHOUT Vary: Origin is cacheable cross-origin even if
+				// another origin's GET happened to carry Vary — the old aggregated some() hid null-origin gaps
+				for (const t of getTests) {
+					if (t.reflected && !/origin/i.test(t.vary)) {
+						out.findings.push(`reflected ACAO for ${t.origin} without Vary: Origin — cacheable cross-origin responses`);
+					}
 				}
 				out.summary = out.findings.length
 					? `${out.findings.length} CORS finding(s) — ${out.findings[0]}`
