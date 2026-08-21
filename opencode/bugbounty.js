@@ -1,6 +1,6 @@
 // dsh-bugbounty-toolkit — OpenCode adapter.
 //
-// Registers all 53 `bb_*` recon/finding tools from dsh-bugbounty plus a
+// Registers all 61 `bb_*` recon/finding tools from dsh-bugbounty plus a
 // keyless web search tool (Tavily keyless mode, no API key).
 //
 // Install locations:
@@ -226,6 +226,34 @@ const TOOL_ARGS = {
   bb_ssrf_probe: {
     url: tool.schema.string().describe("Full URL with a param that feeds a backend fetch, e.g. https://target.com/fetch?url=https://example.com"),
     param: tool.schema.string().optional().describe("Only test this param (default: all query params)"),
+  },
+  bb_sqli_probe: {
+    url: tool.schema.string().describe("Full URL with at least one query param, e.g. https://target.com/search?q=test"),
+    param: tool.schema.string().optional().describe("Only test this param (default: all)"),
+  },
+  bb_open_redirect_probe: {
+    url: tool.schema.string().describe("Full URL with at least one query param, e.g. https://target.com/login?next=/dashboard"),
+    param: tool.schema.string().optional().describe("Only test this param (default: all)"),
+  },
+  bb_lfi_probe: {
+    url: tool.schema.string().describe("Full URL with at least one query param, e.g. https://target.com/download?file=report.pdf"),
+    param: tool.schema.string().optional().describe("Only test this param (default: all)"),
+  },
+  bb_xxe_probe: {
+    url: tool.schema.string().describe("Full URL, e.g. https://target.com/api/xml"),
+  },
+  bb_cmdi_probe: {
+    url: tool.schema.string().describe("Full URL with at least one query param, e.g. https://target.com/ping?host=8.8.8.8"),
+    param: tool.schema.string().optional().describe("Only test this param (default: all)"),
+  },
+  bb_csrf_probe: {
+    url: tool.schema.string().describe("Full URL to a form page, e.g. https://target.com/account/edit"),
+  },
+  bb_smuggle_probe: {
+    url: tool.schema.string().describe("Full URL, e.g. https://target.com/"),
+  },
+  bb_clickjack_probe: {
+    url: tool.schema.string().describe("Full URL, e.g. https://target.com/"),
   },
 };
 

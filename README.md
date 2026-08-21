@@ -43,7 +43,7 @@ The OpenCode adapter is an extra — it is *not* needed for the DSH harness:
 
 ## Tools
 
-### DSH (`dsh-bugbounty` — 53 tools)
+### DSH (`dsh-bugbounty` — 61 tools)
 
 | Tool | What it does |
 |---|---|
@@ -127,10 +127,10 @@ config/dsh-profile/           # live-profile snapshot (byte-identical clones)
   settings.yaml               #   keyless deepseek providers (env-var names only — no keys)
   web-search-bridge.py        #   optional web-search-deepseek bridge
   cordis.yml / package.json / pnpm-workspace.yaml   # profile root files
-plugins/dsh-bugbounty/        # DSH plugin: 53 bb_* tools + bbApi export
+plugins/dsh-bugbounty/        # DSH plugin: 61 bb_* tools + bbApi export
 plugins/dsh-opencode-search/  # DSH plugin: tavily-keyless search provider + searchApi export
 plugins/dsh-nixon-hud/        # DSH plugin: web GUI plugins/state HUD
-opencode/bugbounty.js         # OpenCode adapter (54 tools: 53 bb_* + bb_web_search) — optional
+opencode/bugbounty.js         # OpenCode adapter (62 tools: 61 bb_* + bb_web_search) — optional
 tools/patch_cordis.py         # advanced: idempotent cordis.patch.yml patcher (optional utility)
 install.sh                    # DSH one-click full-profile installer
 install-opencode.sh           # OpenCode installer (optional)
