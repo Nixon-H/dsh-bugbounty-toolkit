@@ -362,7 +362,7 @@ const BODY_PATTERNS = [
 	{ category: "cms", name: "WordPress", re: /<meta[^>]+name=["']generator["'][^>]+content=["']wordpress/i, hint: "wp-content/wp-includes" },
 	{ category: "framework", name: "Next.js", hint: "__NEXT_DATA__" },
 	{ category: "framework", name: "Nuxt.js", hint: "__NUXT__" },
-	{ category: "analytics", name: "GTM/GA", hint: "dataLayer+googletagmanager" },
+	{ category: "analytics", name: "GTM/GA", re: /googletagmanager\.com|dataLayer\.push/i },
 	{ category: "cms", name: "Drupal", re: /drupal|sites\/all\/modules/i },
 	{ category: "cms", name: "Joomla", re: /Joomla!/i },
 	{ category: "frontend", name: "Bootstrap", hint: "bootstrap.min.css" },
@@ -3600,7 +3600,7 @@ const TOOLS = [
 				out.otxHosts = otx.hosts.slice(0, 30);
 				if (spf.error) out.note = "SPF error: " + spf.error;
 				if (otx.error) out.note += (out.note ? "; OTX error: " : "OTX error: ") + otx.error;
-				const candidates = out.spfIps.slice(0, 10);
+				const candidates = out.spfIps.filter((ip) => !ip.includes("/")).slice(0, 10);
 				const results = await mapPool(candidates, 4, (ip) => probeTitle(ip, de, domain));
 				for (const r of results) if (r) out.probes.push({ host: r.host, status: r.status, title: r.title });
 				if (spf.error && /truncated at 12/i.test(spf.error)) out.note += (out.note ? "; " : "") + "SPF chain hit the width cap — ip4/ip6 set may be incomplete";
@@ -5300,6 +5300,7 @@ const TOOLS = [
 				["Barracuda", "/cgi-mod/index.cgi", ["barracuda"]]
 			];
 			try {
+				const de = deadlineExec(exec, 35000);
 				const rows = await mapPool(PROBES, 4, async ([vendor, path, markers]) => {
 					let status = 0;
 					let hdr = "";
@@ -5307,7 +5308,7 @@ const TOOLS = [
 					// try https first, fall back to http for legacy boxes behind load balancers
 					for (const scheme of ["https", "http"]) {
 						try {
-							const b = withBudget(exec, 8000);
+							const b = withBudget(de, 6000);
 							try {
 								const resp = await fetch(scheme + "://" + host + path, { method: "GET", signal: b.signal, redirect: "manual", headers: { "user-agent": UA } });
 								status = resp.status;
@@ -5959,8 +5960,12 @@ const TOOLS = [
 				if (header.jku) out.findings.push({ severity: "MED", text: "jku present (" + String(header.jku).slice(0, 60) + ") — server may fetch attacker JWKS = SSRF/trust-chain bypass" });
 				if (header.x5u) out.findings.push({ severity: "MED", text: "x5u present — external cert URL may be attacker-controlled" });
 				const now = Math.floor(Date.now() / 1000);
-				const expNum = payload.exp === undefined ? NaN : Number(payload.exp);
-				if (payload.exp === undefined) out.findings.push({ severity: "LOW", text: "no exp claim — token never expires" });
+				const rawExp = payload.exp;
+				let expNum = NaN;
+				if (typeof rawExp === "number") expNum = rawExp;
+				else if (typeof rawExp === "string" && /^-?\d+(?:\.\d+)?$/.test(rawExp.trim())) expNum = Number(rawExp.trim());
+				else if (rawExp !== undefined) expNum = NaN;
+				if (rawExp === undefined) out.findings.push({ severity: "LOW", text: "no exp claim — token never expires" });
 				else if (Number.isFinite(expNum) && expNum < now) out.findings.push({ severity: "MED", text: "exp " + payload.exp + " is in the past (now " + now + ") — server accepting it = replay surface" });
 				else if (!Number.isFinite(expNum)) out.findings.push({ severity: "LOW", text: "exp \"" + payload.exp + "\" is not a numeric timestamp — verify how the server parses it (string-typed exp is ignored by many JWT libs)" });
 				for (const k of Object.keys(payload)) {
@@ -6025,34 +6030,48 @@ const TOOLS = [
 					"s3-" + d, "s3-" + stem, stem + "-s3", stem + "-bucket", stem + "-storage", stem + "-backup",
 					stem + "-files", stem + "-uploads", stem,
 				]);
-				await mapPool(names, 6, async (name) => {
-					out.checked++;
+				const cloudResults = await mapPool(names, 6, async (name) => {
 					// all three backends are independent — fire them concurrently; a sequential
 					// 3×10s per name across ceil(25/6) rounds would sum past the 120s timeout
+					const r = { name, azure:false, gcp:false, firebase:false };
 					await Promise.all([
 						(async () => {
 							try {
 								const { res } = await fetchRes("https://" + name + ".blob.core.windows.net/?comp=list", exec, { budget: 10000 });
 								const body = await readLimited(res, 800);
-								if (res.status === 200 && /<EnumerationResults/i.test(body) && !out.azure.includes(name)) out.azure.push(name);
+								if (res.status === 200 && /<EnumerationResults/i.test(body)) r.azure = true;
 							} catch { /* ignore */ }
 						})(),
 						(async () => {
 							try {
 								const { res } = await fetchRes("https://storage.googleapis.com/" + name + "/", exec, { budget: 10000 });
 								const body = await readLimited(res, 800);
-								if (res.status === 200 && /<ListBucketResult/i.test(body) && !out.gcp.includes(name)) out.gcp.push(name);
+								if (res.status === 200 && /<ListBucketResult/i.test(body)) r.gcp = true;
 							} catch { /* ignore */ }
 						})(),
 						(async () => {
 							try {
-								const { res } = await fetchRes("https://" + name + ".firebaseio.com/.json", exec, { budget: 10000 });
-								const body = await readLimited(res, 400);
-								if (res.status === 200 && /^[\[{]/.test(body.trim()) && !out.firebase.includes(name)) out.firebase.push(name);
+								// firebaseio.com is legacy; firebasedatabase.app is the current host — try both
+								let ok = false;
+								for (const host of [name + ".firebaseio.com", name + "-default-rtdb.firebaseio.com", name + ".firebasedatabase.app"]) {
+									try {
+										const { res } = await fetchRes("https://" + host + "/.json", exec, { budget: 10000 });
+										const body = await readLimited(res, 400);
+										if (res.status === 200 && /^[\[{]/.test(body.trim())) { ok = true; break; }
+									} catch {}
+								}
+								r.firebase = ok;
 							} catch { /* ignore */ }
 						})()
 					]);
+					return r;
 				});
+				for (const r of cloudResults) {
+					out.checked++;
+					if (r.azure) out.azure.push(r.name);
+					if (r.gcp) out.gcp.push(r.name);
+					if (r.firebase) out.firebase.push(r.name);
+				}
 				if (!out.azure.length && !out.gcp.length && !out.firebase.length) out.note = "no open storage found on derived names; try bb_wayback_urls for bucket URLs and src-leak for configs.";
 			} catch (e) {
 				out.error = shortErr(e);
@@ -6105,18 +6124,19 @@ const TOOLS = [
 				out.total = list.length;
 				const cap = Math.min(Math.max(parseInt(args.limit || 3, 10) || 3, 1), 8);
 				const ids = list.map((x) => String(x.id || "")).filter(Boolean).slice(0, cap);
-				await mapPool(ids, 3, async (id) => {
+				const psResults = await mapPool(ids, 3, async (id) => {
 					try {
 						const { text: dt } = await fetchText("https://psbdmp.ws/api/v3/dump/" + encodeURIComponent(id), exec, { budget: 15000, headers: { accept: "application/json" } });
 						let dj;
 						try { dj = JSON.parse(dt || "{}"); } catch { dj = {}; }
 						const content = String((dj.data && (dj.data.content || dj.data.text)) || dj.content || "");
 						const tags = Array.isArray(dj.data && dj.data.tags) ? dj.data.tags : [];
-						out.dumps.push({ id, tags: tags.map(String).slice(0, 6), snippet: content.slice(0, 500) });
+						return { id, tags: tags.map(String).slice(0, 6), snippet: content.slice(0, 500) };
 					} catch {
-						out.dumps.push({ id, tags: [], snippet: "" });
+						return { id, tags: [], snippet: "" };
 					}
 				});
+				out.dumps.push(...psResults);
 				if (!out.total) out.note = "no pastes found; broaden query (email prefix, base domain) — psbdmp is rate-limited, expect occasional timeouts.";
 			} catch (e) {
 				out.error = shortErr(e);
@@ -6233,33 +6253,38 @@ const TOOLS = [
 				let rows;
 				try { rows = JSON.parse(text || "[]"); } catch { rows = []; }
 				const subs = uniq((Array.isArray(rows) ? rows : []).flatMap((r) => String(r.name_value || "").split(/[\s,]+/)).map((s) => String(s).trim().toLowerCase()).filter((s) => s && !s.startsWith("*") && s.endsWith("." + d))).slice(0, limit);
-				await mapPool(subs, 6, async (sub) => {
-					out.checked++;
+				const dohEndpoints = ["https://cloudflare-dns.com/dns-query", "https://1.1.1.1/dns-query", "https://dns.google/resolve"];
+				const dohFetch = async (name, type) => {
+					for (const ep of dohEndpoints) {
+						try {
+							const { text } = await fetchText(ep + "?name=" + encodeURIComponent(name) + "&type=" + type, exec, { budget: 8000, headers: { accept: "application/dns-json" } });
+							const j = JSON.parse(text || "{}");
+							if (j && (j.Status === 0 || j.Status === 3) && Array.isArray(j.Answer)) return j;
+							if (j && j.Status === 0) return j;
+						} catch {}
+					}
+					return {};
+				};
+				const danglingResults = await mapPool(subs, 6, async (sub) => {
 					try {
-						const { text: cj } = await fetchText("https://cloudflare-dns.com/dns-query?name=" + encodeURIComponent(sub) + "&type=CNAME", exec, { budget: 8000, headers: { accept: "application/dns-json" } });
-						let j;
-						try { j = JSON.parse(cj || "{}"); } catch { j = {}; }
+						const j = await dohFetch(sub, "CNAME");
 						const answers = Array.isArray(j.Answer) ? j.Answer : [];
 						const cname = answers.find((a) => a.type === 5 && typeof a.data === "string");
-						if (!cname) return;
+						if (!cname) return null;
 						const target = String(cname.data).replace(/\.$/, "");
-						// NXDOMAIN check on the CNAME target via A lookup
 						let nx = false;
 						try {
-							const { text: aj } = await fetchText("https://cloudflare-dns.com/dns-query?name=" + encodeURIComponent(target) + "&type=A", exec, { budget: 8000, headers: { accept: "application/dns-json" } });
-							const ajj = JSON.parse(aj || "{}");
-							// NXDOMAIN is DoH Status 3 — empty Answer with Status 0/2 (no records / SERVFAIL) is NOT NXDOMAIN
+							const ajj = await dohFetch(target, "A");
 							nx = ajj.Status === 3;
-						} catch {
-							nx = false;
-						}
+						} catch { nx = false; }
 						const takeoverable = TAKEOVER.test(target);
-						if (nx && takeoverable) out.dangling.push({ sub, cname: target, note: "NXDOMAIN + takeover-able service (" + (target.match(TAKEOVER) || [""])[0] + ") — verify claim vector (see subdomain-takeover checklist)" });
-						else if (nx) out.dangling.push({ sub, cname: target, note: "NXDOMAIN but not an auto-claim service; manual takeover check" });
-					} catch {
-						// individual sub failures ignored
-					}
+						if (nx && takeoverable) return { sub, cname: target, note: "NXDOMAIN + takeover-able service (" + (target.match(TAKEOVER) || [""])[0] + ") — verify claim vector (see subdomain-takeover checklist)" };
+						if (nx) return { sub, cname: target, note: "NXDOMAIN but not an auto-claim service; manual takeover check" };
+						return null;
+					} catch { return null; }
 				});
+				for (const r of danglingResults) if (r) out.dangling.push(r);
+				out.checked = subs.length;
 				if (!out.checked) out.note = "no subdomains from crt.sh; try the root/wildcard-scope domain.";
 			} catch (e) {
 				out.error = shortErr(e);
@@ -6386,16 +6411,18 @@ const TOOLS = [
 				out.harvested = interesting.length;
 				// 60 probes × 8s at conc-6 = 80s + CDX 30s = 110s > 90s timeout -> scale the probe budget
 				const probeMs = budgetFit(50000, 8000, interesting.length, 6) === null ? 5000 : 8000;
-				await mapPool(interesting, 6, async (u) => {
+				const resResults = await mapPool(interesting, 6, async (u) => {
 					try {
 						const { res } = await fetchRes(u, exec, { budget: probeMs, redirect: "manual" });
 						const body = await readLimited(res, 400);
-						if ((res.status >= 200 && res.status < 300) || res.status === 401 || res.status === 403) out.alive.push({ url: u, status: res.status, size: body.length });
+						if ((res.status >= 200 && res.status < 300) || res.status === 401 || res.status === 403) return { url: u, status: res.status, size: body.length };
 					} catch {
 						// gone/blocked
 					}
+					return null;
 				});
-				out.alive.sort((a, b) => a.status - b.status);
+				out.alive.push(...resResults.filter(Boolean));
+				out.alive.sort((a, b) => a.status - b.status || a.url.localeCompare(b.url));
 				if (!out.alive.length) out.note = "no resurrected endpoints; widen limit or check bb_wayback_urls for more paths.";
 			} catch (e) {
 				out.error = shortErr(e);
@@ -6467,10 +6494,13 @@ const TOOLS = [
 					try {
 						const { res, text } = await fetchText(urlFor(p), de, { budget: 8000 });
 						if (res.status !== 200) continue;
+						let found = false;
 						if (/json/.test(res.headers.get("content-type") || "")) {
-							const spec = JSON.parse(text);
-							const paths = extract(spec);
-							if (paths.length) { out.live = { url: p, paths }; break; }
+							try { const spec = JSON.parse(text); const paths = extract(spec); if (paths.length) { out.live = { url: p, paths }; found = true; } } catch {}
+							if (found) break;
+						} else {
+							try { const spec = JSON.parse(text); const paths = extract(spec); if (paths.length) { out.live = { url: p, paths }; found = true; } } catch {}
+							if (found) break;
 						}
 						const ypaths = extractYamlPaths(text);
 						if (ypaths.length) { out.live = { url: p, paths: ypaths }; break; }
@@ -6491,9 +6521,9 @@ const TOOLS = [
 							ts = (aj.archived_snapshots && aj.archived_snapshots.closest && aj.archived_snapshots.closest.timestamp) || "";
 						} catch { /* keep ts="" -> fallback */ }
 						const { text } = await fetchText("https://web.archive.org/web/" + (ts ? ts + "id_" : "2id_") + "/" + u, de, { budget: 20000 });
-						const spec = JSON.parse(text);
-						const paths = extract(spec);
-						if (paths.length) { out.archived = { url: u, paths }; break; }
+						let archFound = false;
+						try { const spec = JSON.parse(text); const paths = extract(spec); if (paths.length) { out.archived = { url: u, paths }; archFound = true; } } catch {}
+						if (archFound) break;
 						const ypaths = extractYamlPaths(text);
 						if (ypaths.length) { out.archived = { url: u, paths: ypaths }; break; }
 					} catch {
@@ -6627,7 +6657,7 @@ const TOOLS = [
 			const input = String(args.request || "").trim();
 			const out = { input, url: "", fields: [], summary: "", error: "" };
 			try {
-				const SKIP = new Set(["timestamp", "datetime", "date", "time", "version", "build", "epoch", "page", "limit", "offset", "count", "total", "size", "max", "min", "sleep", "wait", "retry", "timeout", "per_page", "sort", "order", "direction", "search", "query", "q", "term", "format", "callback", "_", "t", "v", "csrf", "token", "auth"]);
+				const SKIP = new Set(["timestamp", "datetime", "date", "time", "version", "build", "epoch", "page", "limit", "offset", "count", "total", "size", "max", "min", "sleep", "wait", "retry", "timeout", "per_page", "sort", "order", "direction", "search", "query", "q", "term", "format", "callback", "_", "t", "v", "csrf", "token", "auth", "quantity", "amount", "qty", "price", "total_price", "unit_price"]);
 				const looksLikeId = (val, keyHint) => {
 					if (!val) return false;
 					let minDigits = 5;
