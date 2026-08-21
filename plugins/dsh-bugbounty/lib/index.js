@@ -166,7 +166,7 @@ function normPorts(raw) {
 		if (!Number.isInteger(n)) throw new Error(`ports must be integers (got ${JSON.stringify(p)})`);
 		return n;
 	});
-	if (ports.length === 0) throw new Error("ports must not be empty");
+	if (ports.length === 0) return [80, 443];
 	if (ports.length > 8) throw new Error("too many ports (max 8)");
 	for (const p of ports) if (p < 1 || p > 65535) throw new Error(`port out of range 1-65535 (got ${p})`);
 	return [...new Set(ports)];
@@ -3264,8 +3264,8 @@ const TOOLS = [
 					finding_classes: { type: "array", items: { type: "string" } },
 					sqlite_audit: { type: "array", items: { type: "string" } },
 					report_template: { type: "array", items: { type: "string" } },
-					score: { type: ["number", "null"] },
-					verdict: { type: ["string", "null"] },
+					score: { type: "number" },
+					verdict: { type: "string" },
 					note: { type: "string" },
 					count: { type: "integer" },
 					filtered: { type: "boolean" }
@@ -3294,7 +3294,7 @@ const TOOLS = [
 			const imp = Number(args && args.impact);
 			s.impact = Number.isFinite(imp) ? Math.min(10, Math.max(0, imp)) : null;
 			if (Object.values(s).some((v) => v === null)) {
-				return { ...TRIAGE, count: TRIAGE.rubric.length, filtered: false, score: null, verdict: null, note: "pass pReal/pFeasible/pRepro/pNew (0-1) and impact (0-10) for a computed Rhat verdict" };
+				return { ...TRIAGE, count: TRIAGE.rubric.length, filtered: false, note: "pass pReal/pFeasible/pRepro/pNew (0-1) and impact (0-10) for a computed Rhat verdict" };
 			}
 			// Rhat-style composite: confidence product x novelty x impact.
 			// novelty is the canonical product (NOT 0.6+0.4*pNew): a known/bypassed variant
@@ -4699,7 +4699,8 @@ const TOOLS = [
 					["/.git/config", "[core]"],
 					["/.git/index", "DIRC"],
 					["/.git/logs/HEAD", "0000000"],
-					["/.git/refs/heads/main", "hex40"]
+					["/.git/refs/heads/main", "hex40"],
+					["/.git/refs/heads/master", "hex40"]
 				];
 				const results = await mapPool(probes, 6, async ([p, marker]) => {
 					let status = 0;
@@ -4798,8 +4799,10 @@ const TOOLS = [
 					const em = re.exec(path);
 					const ext = em ? em[1].toLowerCase() : "?";
 					out.by_extension[ext] = (out.by_extension[ext] || 0) + 1;
-					// json/xml/txt/pdf/doc/xls/py are too common to be findings — count them but don't list
-					if (!["json", "xml", "txt", "csv", "pdf", "doc", "docx", "pptx", "rtf", "xls", "py"].includes(ext)) out.matches.push(clean);
+					// json/xml/txt/pdf/doc/xls/py are too common to be findings — count them but don't list,
+					// except json when path looks like an API spec (swagger/openapi/spec) — keep spec discovery
+					const isSpecPath = /swagger|openapi|spec/i.test(clean);
+					if (!["json", "xml", "txt", "csv", "pdf", "doc", "docx", "pptx", "rtf", "xls", "py"].includes(ext) || (ext === "json" && isSpecPath)) out.matches.push(clean);
 				}
 				out.matches = out.matches.slice(0, limit);
 				const exts = Object.entries(out.by_extension).sort((a, b) => b[1] - a[1]).map(([e, n]) => e + "=" + n).join(", ");
@@ -4918,7 +4921,7 @@ const TOOLS = [
 									}
 								}
 								const joined = (out.target_name + " " + Object.values(out.av_pairs).join(" ")).toUpperCase();
-								if (/WIN-[A-Z0-9]{7}/.test(joined)) out.notes.push("WIN-XXXXXXXXXXX hostname — likely corp AD estate; internals may resolve via DNS");
+								if (/WIN-[A-Z0-9]{7,11}/.test(joined)) out.notes.push("WIN-XXXXXXXXXXX hostname — likely corp AD estate; internals may resolve via DNS");
 								if (out.av_pairs.dns_tree) out.notes.push("AD DNS tree: " + out.av_pairs.dns_tree + " — candidates for internal-name fuzzing");
 							}
 						} catch {
@@ -4995,6 +4998,7 @@ const TOOLS = [
 						status = 0;
 					}
 					r.status = status;
+					let postIntrospected = false;
 					if (status === 200) {
 						let parsed = null;
 						try {
@@ -5007,8 +5011,45 @@ const TOOLS = [
 						const rawHit = body.includes('"__schema"') && /"types"\s*:/.test(body);
 						if (schema || rawHit) {
 							r.introspection = true;
+							postIntrospected = true;
 							if (schema && Array.isArray(schema.types)) r.type_count = schema.types.length;
 							if (schema && schema.mutationType && schema.mutationType.name) r.has_mutations = true;
+						}
+					}
+					// fallback GET probe — some endpoints only allow GET ?query= (missed by POST-only scan)
+					if (!postIntrospected) {
+						try {
+							const b2 = withBudget(exec, 5000);
+							try {
+								const getUrl = base + p + "?query=" + encodeURIComponent("{ __schema { queryType { name } mutationType { name } types { name kind } } }");
+								const resp2 = await fetch(getUrl, {
+									method: "GET",
+									signal: b2.signal,
+									redirect: "follow",
+									headers: { "user-agent": UA, accept: "application/json" }
+								});
+								const status2 = resp2.status;
+								const body2 = await readLimited(resp2, 262144);
+								if (status2 === 200) {
+									let parsed2 = null;
+									try { parsed2 = JSON.parse(body2); } catch { /* not JSON */ }
+									const schema2 = parsed2 && parsed2.data && parsed2.data.__schema ? parsed2.data.__schema : null;
+									const rawHit2 = body2.includes('"__schema"') && /"types"\s*:/.test(body2);
+									if (schema2 || rawHit2) {
+										r.introspection = true;
+										r.status = status2;
+										if (schema2 && Array.isArray(schema2.types)) r.type_count = schema2.types.length;
+										if (schema2 && schema2.mutationType && schema2.mutationType.name) r.has_mutations = true;
+									} else if (status === 0 || status >= 400) {
+										// record GET status if POST was error/zero and GET gave a real HTTP answer
+										r.status = status2;
+									}
+								}
+							} finally {
+								b2.dispose();
+							}
+						} catch {
+							/* GET fallback failed — keep POST result */
 						}
 					}
 					return r;
@@ -5102,7 +5143,8 @@ const TOOLS = [
 					}
 					let noteOut = status === 200 ? note : "";
 					if (status === 200 && note && /\.git/.test(p)) noteOut = "git repo — dump with git-dumper";
-					if (status === 200 && /env/.test(p) && /(KEY|SECRET|PASS|TOKEN|DATABASE)/i.test(body)) noteOut = "env file with credential strings(!)";
+					// tighten: require KEY|SECRET etc adjacent to = or : to avoid FP on 300B word "sources" noise
+					if (status === 200 && /env/.test(p) && /(KEY|SECRET|PASS|TOKEN|DATABASE)\s*[:=]/i.test(body)) noteOut = "env file with credential strings(!)";
 					if (status === 200 && /swagger|openapi|api-docs/.test(p)) noteOut = "API spec — mine endpoints with bb_swagger_scan";
 					// collect + push AFTER the pool (mapPool is order-preserving; out-of-order push races would corrupt per-row notes)
 					return { path: p, status, note: noteOut };
@@ -5131,7 +5173,8 @@ const TOOLS = [
 						} catch {
 							status = 0;
 						}
-						return status === 200 && (body.includes('"version"') || body.includes('"sources"') || body.includes('"mappings"')) ? base + mapPath : "";
+						// tighten: require both version+sources or mappings — any single word hits noise at 300B
+						return status === 200 && ((body.includes('"version"') && body.includes('"sources"')) || body.includes('"mappings"')) ? base + mapPath : "";
 					});
 					for (const m of mapHits) if (m) out.sourcemaps.push(m);
 				}
@@ -5202,17 +5245,32 @@ const TOOLS = [
 						? pu.origin + "/api/" + v + (resource ? "/" + resource : "") + pu.search
 						: basePath + "/" + v + pu.search;
 					let status = 0;
+					let bodyLen = 0;
+					let title = "";
 					try {
 						const { res } = await fetchRes(probe, exec, { budget: 5000 });
 						status = res.status;
+						const body = await readLimited(res, 2000);
+						bodyLen = body.length;
+						const m = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(body);
+						if (m) title = m[1].replace(/\s+/g, " ").trim().slice(0, 80);
 					} catch {
 						status = 0;
 					}
-					return { probe, status, v };
+					return { probe, status, v, bodyLen, title };
 				});
 				for (const { probe, status, v } of versionResults) {
 					out.versions.push({ probe, status });
 					if (status && status !== 404 && status !== 0) out.live.push(`${v} (${status})`);
+				}
+				// catch-all 200 FP: if every version returns 200 with identical size/title, it's a generic catch-all, not live APIs
+				if (out.live.length === VERS.length && versionResults.every((r) => r.status === 200)) {
+					const sizes = new Set(versionResults.map((r) => r.bodyLen));
+					const titles = new Set(versionResults.map((r) => r.title));
+					if (sizes.size === 1 && titles.size === 1) {
+						out.notes.push(`catch-all suspected: all ${VERS.length} version probes returned 200 with identical body (${[...sizes][0]}B, title "${[...titles][0] || "no title"}") — likely a front-end catch-all, not live API versions`);
+						out.live = [];
+					}
 				}
 				if (args.version_params !== false) {
 					let stV = 0;
@@ -5359,8 +5417,9 @@ const TOOLS = [
 		isConcurrencySafe: () => true,
 		async execute(args, exec) {
 			const host = String(args.host || "").trim().replace(/^https?:\/\//, "").split("/")[0].split("?")[0].split("#")[0].replace(/\/+$/, "");
+			const hostOnly = host.replace(/:\d+$/, "");
 			const out = { host, results: [], vendors: [], summary: "", error: "" };
-			if (!host || !/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/i.test(host)) { out.error = "host required — a bare hostname like vpn.example.com (no scheme, no path)"; return out; }
+			if (!hostOnly || !/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/i.test(hostOnly)) { out.error = "host required — a bare hostname like vpn.example.com (no scheme, no path)"; return out; }
 			const PROBES = [
 				["Cisco ASA/AnyConnect", "/+CSCOE+/logon.html", ["set-cookie: webvpn", "cisco it"]],
 				["Cisco FTD/ASA", "/+webvpn+/index.html", ["set-cookie: webvpn"]],
@@ -5433,6 +5492,7 @@ const TOOLS = [
 					caa: { type: "array", items: { type: "string" } },
 					mta_sts: { type: "string" },
 					findings: { type: "array", items: { type: "string" } },
+					dkim_selector: { type: "string" },
 					summary: { type: "string" },
 					error: { type: "string" }
 				},
@@ -5613,6 +5673,7 @@ const TOOLS = [
 		isConcurrencySafe: () => true,
 		async execute(args, exec) {
 			const domain = normalizeDomain(args.domain);
+			if (!DOMAIN_RE.test(domain)) return { domain: String(args.domain || ""), realm: {}, autodiscover: {}, findings: [], summary: "", error: `invalid domain: "${args.domain}" — use a bare hostname like example.com` };
 			const user = (String(args.user || "admin")).replace(/@.*$/, "") + "@" + domain;
 			const out = { domain, realm: {}, autodiscover: {}, findings: [], summary: "", error: "" };
 			try {
@@ -5635,6 +5696,28 @@ const TOOLS = [
 						};
 						if (out.realm.namespace_type === "Federated" && out.realm.auth_url) out.findings.push("FEDERATED — ADFS SSO at " + out.realm.auth_url + "; SAML attacks apply (XSW, comment injection, sig stripping)");
 						if (out.realm.namespace_type === "Managed") out.findings.push("MANAGED (cloud-only) — ROPC auth flow works; password-spray + AADSTS-code user enumeration viable");
+					}
+					// JSON variant fallback — some tenants return JSON only when &json=1 is used
+					if (!out.realm.namespace_type) {
+						try {
+							const resp2 = await fetch(`https://login.microsoftonline.com/getuserrealm.srf?login=${encodeURIComponent(user)}&json=1`, { method: "GET", signal: b.signal, headers: { "user-agent": UA, accept: "application/json" } });
+							const jtxt = await readLimited(resp2, 4000);
+							let j = null;
+							try { j = JSON.parse(jtxt); } catch {}
+							if (j && j.NameSpaceType) {
+								out.realm = {
+									namespace_type: j.NameSpaceType || "",
+									auth_url: j.AuthURL || "",
+									federation_protocol: j.FederationProtocol || "",
+									tenant_name: j.TenantName || "",
+									cloud_instance: j.CloudInstanceName || ""
+								};
+								if (out.realm.namespace_type === "Federated" && out.realm.auth_url) out.findings.push("FEDERATED (JSON) — ADFS SSO at " + out.realm.auth_url);
+								if (out.realm.namespace_type === "Managed") out.findings.push("MANAGED (JSON, cloud-only) — ROPC viable");
+							}
+						} catch {
+							/* JSON variant failed — keep XML result */
+						}
 					}
 				} catch {
 					out.realm = {};
@@ -5713,7 +5796,8 @@ const TOOLS = [
 				const mk = (h) => ["age", "x-cache", "cf-cache-status", "x-cache-status", "x-varnish", "cache-control"].map((n) => { const v = hget(h, n); return v ? n + ": " + v : ""; }).filter(Boolean).join(", ") || "-";
 				const ind = ["age", "x-cache", "cf-cache-status", "x-cache-status", "x-varnish"].map((n) => hget(baseline.res.headers, n)).filter(Boolean);
 				out.cache_indicators = [...new Set(ind)];
-				const sawCache = out.cache_indicators.length > 0;
+				// MISS/DYNAMIC/BYPASS and Age:0 are NOT cache-hit evidence (cacheEvidence logic) — only HIT/Age>0 counts
+				const sawCache = cacheEvidence(baseline.res).length > 0;
 				const hashes = new Map();
 				const headerResults = await mapPool(HEADERS, 4, async (h) => {
 					const vals = h === "x-forwarded-host" ? ["evil.example.net", "poisoned.example.net"] : h === "x-original-url" ? ["/admin", "/profile"] : ["203.0.113.7", "203.0.113.8"];
@@ -5838,18 +5922,27 @@ const TOOLS = [
 				}
 				const flat = statuses;
 				const timedOut = flat.filter(s => s === 0).length;
-				const hasBlock = flat.some(s => s === 429 || s === 403);
+				const has429 = flat.some(s => s === 429);
+				const has403 = flat.some(s => s === 403);
+				const hasBlock = has429 || has403;
 				const has302 = flat.some(s => s === 302 || s === 301);
 								const b1 = out.bursts[0] ? out.bursts[0].requests : [];
 				const b2 = out.bursts[1] ? out.bursts[1].requests : [];
 				// lockout = transition INTO all-401 (burst1 had success/redirect statuses), not constant 401s
 				const lockout = b2.length > 0 && b2.every((r) => r.status === 401) && !b1.every((r) => r.status === 401) && b1.some((r) => r.status >= 200 && r.status < 400);
-				if (hasBlock) {
-					const firstBlock = flat.findIndex(s => s === 429 || s === 403) + 1;
-					const kind = flat.includes(429) ? "429 (rate limit)" : "403 (WAF/account-block)";
+				if (has429) {
+					const firstBlock = flat.findIndex(s => s === 429) + 1;
+					const kind = "429 (rate limit)";
 					out.classification = "HARD — " + kind + " after " + firstBlock + " request(s) in burst 1" + (timedOut ? " (" + timedOut + " timed out, block still proven by " + kind + ")" : "");
 					out.evidence.push(`first block at request #${firstBlock} (${kind})`);
 					out.evidence.push(flat.slice(0, firstBlock).every(s => s === 401 || s === 400 || s === 422) ? "pre-block responses are credential-rejection statuses, not rate-limit" : "pre-block mix of statuses");
+					if (has403) out.evidence.push("also saw 403 (WAF/account-block) alongside 429 — mixed block signals");
+				} else if (has403) {
+					const firstBlock = flat.findIndex(s => s === 403) + 1;
+					const kind = "403 (WAF/account-block)";
+					out.classification = "WAF/BLOCK — " + kind + " after " + firstBlock + " request(s) in burst 1 — not a standard 429 rate limit" + (timedOut ? " (" + timedOut + " timed out)" : "");
+					out.evidence.push(`first block at request #${firstBlock} (${kind})`);
+					out.evidence.push(flat.slice(0, firstBlock).every(s => s === 401 || s === 400 || s === 422) ? "pre-block responses are credential-rejection statuses" : "pre-block mix of statuses");
 				} else if (has302) {
 					out.classification = "SUSPICIOUS — redirects (302) instead of block; check for redirect-based lockout bypass or session-token rotation";
 					out.evidence.push(flat.filter(s => s === 302).length + " of " + flat.length + " responses were redirects");
@@ -5953,6 +6046,27 @@ const TOOLS = [
 							b.dispose();
 						}
 				}
+				// form/urlencoded variant battery — keep JSON primary, add form as additional coverage (some backends only parse form)
+				const formPayloads = [
+					{ name: "form-ne-ne", payload: encodeURIComponent(uf + "[$ne]") + "=a&" + encodeURIComponent(pf + "[$ne]") + "=a" },
+					{ name: "form-gt", payload: encodeURIComponent(uf + "[$gt]") + "=&" + encodeURIComponent(pf + "[$gt]") + "=" },
+					{ name: "form-regex", payload: encodeURIComponent(uf + "[$regex]") + "=.*&" + encodeURIComponent(pf + "[$regex]") + "=.*" }
+				];
+				for (const p of formPayloads) {
+					const b = withBudget(exec, 5000);
+					try {
+						const r = await fetch(target, { method: "POST", signal: b.signal, redirect: "manual", headers: { "user-agent": UA, "content-type": "application/x-www-form-urlencoded" }, body: p.payload });
+						const txt = await readLimited(r, 4000);
+						const low = txt.toLowerCase();
+						const marker = MARKERS.filter(m => low.includes(m));
+						out.results.push({ name: p.name, payload: p.payload, status: r.status, body_len: txt.length, marker });
+					} catch (e) {
+						out.results.push({ name: p.name, payload: p.payload, status: 0, body_len: 0, marker: [] });
+						out.errors.push(p.name + ": " + shortErr(e));
+					} finally {
+						b.dispose();
+					}
+				}
 				const nonBase = out.results.slice(1);
 				const baselineMarkers = new Set(MARKERS.filter((m) => baseline.text.includes(m)));
 				// only markers NOT already in the baseline page count as signals
@@ -6041,7 +6155,8 @@ const TOOLS = [
 				if (typeof rawExp === "number") expNum = rawExp;
 				else if (typeof rawExp === "string" && /^-?\d+(?:\.\d+)?$/.test(rawExp.trim())) expNum = Number(rawExp.trim());
 				else if (rawExp !== undefined) expNum = NaN;
-				if (rawExp === undefined) out.findings.push({ severity: "LOW", text: "no exp claim — token never expires" });
+				if (Array.isArray(rawExp)) out.findings.push({ severity: "LOW", text: "exp is array (" + JSON.stringify(rawExp).slice(0, 40) + ") — not a numeric timestamp, verify how the server parses it" });
+				else if (rawExp === undefined) out.findings.push({ severity: "LOW", text: "no exp claim — token never expires" });
 				else if (Number.isFinite(expNum) && expNum < now) out.findings.push({ severity: "MED", text: "exp " + payload.exp + " is in the past (now " + now + ") — server accepting it = replay surface" });
 				else if (!Number.isFinite(expNum)) out.findings.push({ severity: "LOW", text: "exp \"" + payload.exp + "\" is not a numeric timestamp — verify how the server parses it (string-typed exp is ignored by many JWT libs)" });
 				for (const k of Object.keys(payload)) {
@@ -6106,6 +6221,8 @@ const TOOLS = [
 					"s3-" + d, "s3-" + stem, stem + "-s3", stem + "-bucket", stem + "-storage", stem + "-backup",
 					stem + "-files", stem + "-uploads", stem,
 				]);
+				// 25 names × 3×10s Firebase sequential = 150s >120s timeout — deadlineExec bounds all fetches
+				const de = deadlineExec(exec, 110000);
 				const cloudResults = await mapPool(names, 6, async (name) => {
 					// all three backends are independent — fire them concurrently; a sequential
 					// 3×10s per name across ceil(25/6) rounds would sum past the 120s timeout
@@ -6113,14 +6230,14 @@ const TOOLS = [
 					await Promise.all([
 						(async () => {
 							try {
-								const { res } = await fetchRes("https://" + name + ".blob.core.windows.net/?comp=list", exec, { budget: 10000 });
+								const { res } = await fetchRes("https://" + name + ".blob.core.windows.net/?comp=list", de, { budget: 10000 });
 								const body = await readLimited(res, 800);
 								if (res.status === 200 && /<EnumerationResults/i.test(body)) r.azure = true;
 							} catch { /* ignore */ }
 						})(),
 						(async () => {
 							try {
-								const { res } = await fetchRes("https://storage.googleapis.com/" + name + "/", exec, { budget: 10000 });
+								const { res } = await fetchRes("https://storage.googleapis.com/" + name + "/", de, { budget: 10000 });
 								const body = await readLimited(res, 800);
 								if (res.status === 200 && /<ListBucketResult/i.test(body)) r.gcp = true;
 							} catch { /* ignore */ }
@@ -6131,7 +6248,7 @@ const TOOLS = [
 								let ok = false;
 								for (const host of [name + ".firebaseio.com", name + "-default-rtdb.firebaseio.com", name + ".firebasedatabase.app"]) {
 									try {
-										const { res } = await fetchRes("https://" + host + "/.json", exec, { budget: 10000 });
+										const { res } = await fetchRes("https://" + host + "/.json", de, { budget: 10000 });
 										const body = await readLimited(res, 400);
 										if (res.status === 200 && /^[\[{]/.test(body.trim())) { ok = true; break; }
 									} catch {}
@@ -6198,7 +6315,7 @@ const TOOLS = [
 				try { data = JSON.parse(text || "{}"); } catch { data = {}; }
 				const list = Array.isArray(data.data) ? data.data : Array.isArray(data) ? data : [];
 				out.total = list.length;
-				const cap = Math.min(Math.max(parseInt(args.limit || 3, 10) || 3, 1), 8);
+				const cap = clampLimit(args.limit, 3, 1, 8);
 				const ids = list.map((x) => String(x.id || "")).filter(Boolean).slice(0, cap);
 				const psResults = await mapPool(ids, 3, async (id) => {
 					try {
@@ -6281,6 +6398,7 @@ const TOOLS = [
 					}
 				});
 				if (!out.repos.length) out.note = "no repos for '" + org + "'; try a shorter company name or search query.";
+				else out.note = "searched first page only (25 results); pagination not fetched — refine query for broader matches.";
 			} catch (e) {
 				out.error = shortErr(e);
 			}
@@ -6324,8 +6442,9 @@ const TOOLS = [
 			const out = { domain: d, checked: 0, dangling: [], note: "" };
 			const TAKEOVER = /(s3[\w.-]*\.amazonaws\.com|blob\.core\.windows\.net|\.cloudfront\.net|herokuapp\.com|\.ghost\.io|\.netlify\.app|\.surge\.sh|\.readme\.io|github\.io|\.fastly\.net|\.zendesk\.com|\.vercel\.app|\.azurewebsites\.net|\.firebaseio\.com|\.myshopify\.com)/i;
 			try {
+				const de = deadlineExec(exec, 140000);
 				const limit = clampLimit(args.limit, 40, 1, 40); // >40 subs: 2 DoH fetches each at conc-6 would blow the 150s window
-				const { text } = await fetchText("https://crt.sh/?q=%25." + encodeURIComponent(d) + "&output=json", exec, { budget: 30000, headers: { accept: "application/json" } });
+				const { text } = await fetchText("https://crt.sh/?q=%25." + encodeURIComponent(d) + "&output=json", de, { budget: 30000, headers: { accept: "application/json" } });
 				let rows;
 				try { rows = JSON.parse(text || "[]"); } catch { rows = []; }
 				const subs = uniq((Array.isArray(rows) ? rows : []).flatMap((r) => String(r.name_value || "").split(/[\s,]+/)).map((s) => String(s).trim().toLowerCase()).filter((s) => s && !s.startsWith("*") && s.endsWith("." + d))).slice(0, limit);
@@ -6333,7 +6452,7 @@ const TOOLS = [
 				const dohFetch = async (name, type) => {
 					for (const ep of dohEndpoints) {
 						try {
-							const { text } = await fetchText(ep + "?name=" + encodeURIComponent(name) + "&type=" + type, exec, { budget: 8000, headers: { accept: "application/dns-json" } });
+							const { text } = await fetchText(ep + "?name=" + encodeURIComponent(name) + "&type=" + type, de, { budget: 8000, headers: { accept: "application/dns-json" } });
 							const j = JSON.parse(text || "{}");
 							if (j && (j.Status === 0 || j.Status === 3) && Array.isArray(j.Answer)) return j;
 							if (j && j.Status === 0) return j;
@@ -6406,7 +6525,7 @@ const TOOLS = [
 				const rnd = () => "zz" + Math.random().toString(36).slice(2, 10);
 				const labels = [rnd(), rnd(), rnd()];
 				const ipSets = [];
-				// collect ordered results from mapPool — push-inside-callback would jumble label order
+				// budget: 3 labels × 3 DoH fallbacks × 8s sequential = 24s worst; parallel via mapPool 3 keeps within 25s timeout; sequential fallback is intentional for reliability
 				const rows = await mapPool(labels, 3, async (lbl) => {
 					const fqdn = lbl + "." + d;
 					for (const doh of ["cloudflare-dns.com", "1.1.1.1", "dns.google"]) {
@@ -6491,7 +6610,9 @@ const TOOLS = [
 					try {
 						const { res } = await fetchRes(u, exec, { budget: probeMs, redirect: "manual" });
 						const body = await readLimited(res, 400);
-						if ((res.status >= 200 && res.status < 300) || res.status === 401 || res.status === 403) return { url: u, status: res.status, size: body.length };
+						// 2xx = truly alive; 401/403 = auth-gated (resurrected but not openly accessible) — keep but distinguish
+						if (res.status >= 200 && res.status < 300) return { url: u, status: res.status, size: body.length };
+						if (res.status === 401 || res.status === 403) return { url: u, status: res.status, size: body.length };
 					} catch {
 						// gone/blocked
 					}
@@ -6500,6 +6621,11 @@ const TOOLS = [
 				out.alive.push(...resResults.filter(Boolean));
 				out.alive.sort((a, b) => a.status - b.status || a.url.localeCompare(b.url));
 				if (!out.alive.length) out.note = "no resurrected endpoints; widen limit or check bb_wayback_urls for more paths.";
+				else {
+					const gated = out.alive.filter((a) => a.status === 401 || a.status === 403).length;
+					const open = out.alive.length - gated;
+					if (gated) out.note = (out.note ? out.note + " " : "") + open + " open (2xx) + " + gated + " auth-gated (401/403) — gated are resurrected but not openly accessible, verify auth.";
+				}
 			} catch (e) {
 				out.error = shortErr(e);
 			}
@@ -6548,12 +6674,12 @@ const TOOLS = [
 			const empty = { url: "", paths: [] };
 			const out = { domain: d, live: { ...empty }, archived: { ...empty }, added: [], removed: [], note: "" };
 			const extract = (spec) => (spec && typeof spec === "object" && spec.paths && typeof spec.paths === "object" ? Object.keys(spec.paths) : []);
-			// yaml specs: cheap line-scrape of top-level path keys (2-space indent + "/...:") — no yaml dependency needed
+			// yaml specs: cheap line-scrape of top-level path keys (2+ space indent + "/...:") — handles both 2- and 4-space yaml
 			const extractYamlPaths = (text) => {
 				if (!text || !/^(openapi|swagger):/mi.test(text)) return [];
 				const paths = [];
 				for (const line of String(text).split(/\r?\n/)) {
-					const m = line.match(/^\s{2}\/[^:\s][^:]*:$/);
+					const m = line.match(/^\s{2,}\/[^:\s][^:]*:\s*$/);
 					if (m) paths.push(m[0].trim().replace(/:$/, ""));
 				}
 				return paths;
@@ -6571,10 +6697,7 @@ const TOOLS = [
 						const { res, text } = await fetchText(urlFor(p), de, { budget: 8000 });
 						if (res.status !== 200) continue;
 						let found = false;
-						if (/json/.test(res.headers.get("content-type") || "")) {
-							try { const spec = JSON.parse(text); const paths = extract(spec); if (paths.length) { out.live = { url: p, paths }; found = true; } } catch {}
-							if (found) break;
-						} else {
+						{
 							try { const spec = JSON.parse(text); const paths = extract(spec); if (paths.length) { out.live = { url: p, paths }; found = true; } } catch {}
 							if (found) break;
 						}
@@ -6733,7 +6856,7 @@ const TOOLS = [
 			const input = String(args.request || "").trim();
 			const out = { input, url: "", fields: [], summary: "", error: "" };
 			try {
-				const SKIP = new Set(["timestamp", "datetime", "date", "time", "version", "build", "epoch", "page", "limit", "offset", "count", "total", "size", "max", "min", "sleep", "wait", "retry", "timeout", "per_page", "sort", "order", "direction", "search", "query", "q", "term", "format", "callback", "_", "t", "v", "csrf", "token", "auth", "quantity", "amount", "qty", "price", "total_price", "unit_price"]);
+				const SKIP = new Set(["timestamp", "datetime", "date", "time", "version", "build", "epoch", "page", "limit", "offset", "count", "total", "size", "max", "min", "sleep", "wait", "retry", "timeout", "per_page", "sort", "order", "direction", "search", "query", "q", "term", "format", "callback", "_", "t", "v", "csrf", "token", "auth", "quantity", "amount", "qty", "price", "total_price", "unit_price", "cost", "grand_total"]);
 				const looksLikeId = (val, keyHint) => {
 					if (!val) return false;
 					let minDigits = 5;
@@ -6891,7 +7014,7 @@ const TOOLS = [
 	},
 	{
 		name: "bb_idor_boundary_gen",
-		description: "Deterministic IDOR/BOLA boundary-test battery generator (ported from idor-tester-ai AI-skills 'IDOR Boundary Testing' + 'BOLA Deep Scan' prompts, no LLM needed): from any discovered ID value produce 0, -1, 999999999, off-by-one (+1/-1), same-length random, UUID segment mutations, sibling/parent IDs, remove-param, null/empty. Pure compute, no network.",
+		description: "Pseudo-random IDOR/BOLA boundary-test battery generator (ported from idor-tester-ai AI-skills 'IDOR Boundary Testing' + 'BOLA Deep Scan' prompts, no LLM needed): from any discovered ID value produce 0, -1, 999999999, off-by-one (+1/-1), same-length pseudo-random, UUID segment mutations, sibling/parent IDs, remove-param, null/empty. Pure compute, no network.",
 		parameters: {
 			type: "object",
 			additionalProperties: false,
@@ -6965,7 +7088,7 @@ const TOOLS = [
 					push("same-length-random", randDigits(String(id).length) || Array.from({ length: String(id).length }, () => "abcdefghijklmnopqrstuvwxyz0123456789"[Math.floor(Math.random() * 36)]).join(""), "random same-length token — pool-style swap");
 				}
 				out.tests = out.tests.filter((t, i, a) => a.findIndex((x) => x.name === t.name && x.replacement === t.replacement) === i);
-				out.note = "deterministic battery (" + out.tests.length + " tests) — feed replacements into bb_idor_swap_probe / your request and diff against the clean baseline; heuristic leads only, verify manually";
+				out.note = "pseudo-random battery (" + out.tests.length + " tests) — feed replacements into bb_idor_swap_probe / your request and diff against the clean baseline; heuristic leads only, verify manually";
 			} catch (e) {
 				out.error = shortErr(e);
 			}
@@ -6974,7 +7097,7 @@ const TOOLS = [
 	},
 	{
 		name: "bb_idor_swap_probe",
-		description: "Active IDOR/BOLA swap test (idor-tester-ai port): sends the target request as a clean baseline, rebuilds a copy with attacker_id replaced by victim_id (URL and body), resends, then classifies via a decision tree: CONFIRMED (swapped ID echoed in the victim response, >=6 chars, not true/false/null) / HIGH (same status as baseline AND >=85% body similarity — swapped ID likely not enforced) / MEDIUM (same status AND >=50% similarity) / LOW (other same-status outcomes) / BLOCKED (deny keywords, error JSON, 401/403/404) / ERROR (5xx) / EMPTY / OTHER / SKIPPED. Note the similarity tiers require EQUAL status to the baseline. Pure keyless HTTP — BUT this fires requests at the URL you provide: only run against endpoints you are authorized to test, never against other users' data. Findings are heuristic leads — verify manually before reporting.",
+		description: "Active IDOR/BOLA swap test (idor-tester-ai port): sends the target request as a clean baseline, rebuilds a copy with attacker_id replaced by victim_id (URL and body, substring swap), resends, then classifies via a decision tree: CONFIRMED (swapped ID echoed in the victim response, >=2 chars, not true/false/null) / HIGH (same status as baseline AND >=85% body similarity — swapped ID likely not enforced) / MEDIUM (same status AND >=50% similarity) / LOW (other same-status outcomes) / BLOCKED (deny keywords, error JSON, 401/403/404) / ERROR (5xx) / EMPTY / OTHER / SKIPPED. Note the similarity tiers require EQUAL status to the baseline. Pure keyless HTTP — BUT this fires requests at the URL you provide: only run against endpoints you are authorized to test, never against other users' data. Findings are heuristic leads — verify manually before reporting.",
 		parameters: {
 			type: "object",
 			additionalProperties: false,
@@ -7069,12 +7192,11 @@ const TOOLS = [
 					return false;
 				};
 
-				// build modified target: attacker -> victim in URL and body (whole-ID tokens only,
-				// so short numeric ids like "42" never corrupt longer runs like "4200" or "1142")
+				// substring swap (mid-token allowed) — handles IDs embedded in path segments / tokens where word-boundary would miss
 				const swapId = (s) => {
 					if (!attackerId || !s.includes(attackerId)) return s;
 					const esc = attackerId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-					return s.replace(new RegExp("(?<![0-9A-Za-z_])" + esc + "(?![0-9A-Za-z_])", "g"), victimId);
+					return s.replace(new RegExp(esc, "g"), victimId);
 				};
 				const modUrl = swapId(url);
 				const modBody = swapId(body);
@@ -7102,7 +7224,7 @@ const TOOLS = [
 				const deny = denyCheck(test.text, test.status);
 				out.test.deny = deny.strong || deny.weak;
 				out.test.error_json = errorJson(test.text);
-				const echoed = victimId && victimId.length >= 6 && !/^(true|false|null|none|undefined)$/i.test(victimId) && test.text.includes(victimId);
+				const echoed = victimId && victimId.length >= 2 && !/^(true|false|null|none|undefined)$/i.test(victimId) && test.text.includes(victimId);
 				out.test.echoed = echoed;
 				out.analysis = "Base=" + base.status + "|" + base.len + " Test=" + test.status + "|" + test.len + " Sim=" + sim + "%";
 
@@ -7215,7 +7337,7 @@ const TOOLS = [
 					const raw = txt.includes('bbxss7f3a"><');
 					const htmlEnc = txt.includes("bbxss7f3a&lt;") || txt.includes("bbxss7f3a&quot;");
 					const urlEnc = txt.includes("bbxss7f3a%3C") || txt.includes("bbxss7f3a%22");
-					const attr = new RegExp("(?:src|href|action|data-[a-z]+)=\"[^\"]*bbxss7f3a", "i").test(txt);
+					const attr = new RegExp("(?:src|href|action|data-[a-z]+)=[\"'][^\"']*bbxss7f3a", "i").test(txt);
 					const scriptCtx = new RegExp("<script[^>]*>[^<]*bbxss7f3a", "i").test(txt);
 					let context = "stripped"; // marker prefix present but specials consumed/encoded elsewhere
 					if (raw) context = "unsafe-raw";
@@ -7331,7 +7453,6 @@ const TOOLS = [
 						else if (r.status !== 0 && baseResp.status !== 0 && r.status !== baseResp.status) note = "status diff vs baseline (" + baseResp.status + " -> " + r.status + ")";
 						else if (r.status === 0 && baseResp.status !== 0) note = "request failed while baseline worked — possible outbound fetch/connect attempt";
 						else if (r.status !== 0 && baseResp.status !== 0 && Math.abs(r.txt.length - baseResp.txt.length) > 250 && /refused|timed? ?out|no route/i.test(r.txt)) note = "server-side connection error leak (" + r.txt.slice(0, 60) + ")";
-						else if (r.kind === "gcp-imds" && r.status !== 0 && r.txt.length < 50 && baseResp.status !== 0) note = "short/empty 200 — GCP IMDS requires Metadata-Flavor: Google header; empty body still suspicious";
 						out.results.push({ param: p, probe: r.kind + " " + r.url, status: r.status, baseline_status: baseResp.status, body_marker: isImds ? "imds" : "", note });
 					}
 				}
@@ -7401,7 +7522,9 @@ const GUIDANCE = [
 	"- bb_api_docs_diff(domain) — diff live OpenAPI/Swagger vs newest archive: shadow/removed endpoints surface.",
 		"bb_idor_extract parses a raw request/URL and lists field-name-aware candidate ID fields (query/path/matrix/JSON/XML/Bearer); bb_idor_boundary_gen turns any discovered ID into a 0/-1/999999999/off-by-one/UUID-mutation battery — both are pure local compute, use them before firing any swap probe.",
 	"bb_idor_swap_probe FIRES baseline + ID-swapped requests at the URL you provide — authorized targets only; CONFIRMED/HIGH are heuristic leads, verify manually before reporting (idor-tester-ai scoring).",
-"- bb_h1_intel(handle?) — best-effort HackerOne scope JSON / public programs index for scope verification."
+"- bb_h1_intel(handle?) — best-effort HackerOne scope JSON / public programs index for scope verification.",
+"- bb_xss_probe(url) — ACTIVE reflected-XSS candidate probe: injects benign marker contexts (event-handler/attribute/JS-string/svg) into discovered params and classifies reflection contexts; heuristic leads only, hand-craft payloads before reporting.",
+"- bb_ssrf_probe(url) — ACTIVE SSRF sink probe: substitutes fetch-shaped params (url/uri/callback/image/proxy) with loopback/metadata canaries and classifies response/timing differentials; authorized targets only."
 ].join("\n");
 
 export function apply(ctx) {
