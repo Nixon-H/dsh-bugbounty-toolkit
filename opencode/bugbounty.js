@@ -16,15 +16,13 @@ import { tool } from "@opencode-ai/plugin";
 const LIB_CANDIDATES = {
   bounty: [
     "../vendor/dsh-bugbounty/lib/index.js",          // installed global layout
-    "./vendor/dsh-bugbounty/lib/index.js",            // config-dir variant
-    "../../plugins/dsh-bugbounty/lib/index.js",       // repo layout (opencode/ -> plugins/)
-    "../../../plugins/dsh-bugbounty/lib/index.js",    // nested project layout
+    "../plugins/dsh-bugbounty/lib/index.js",         // repo layout (opencode/ -> plugins/)
+    "../../plugins/dsh-bugbounty/lib/index.js",      // nested project layout
   ],
   search: [
     "../vendor/dsh-opencode-search/lib/index.js",
-    "./vendor/dsh-opencode-search/lib/index.js",
+    "../plugins/dsh-opencode-search/lib/index.js",
     "../../plugins/dsh-opencode-search/lib/index.js",
-    "../../../plugins/dsh-opencode-search/lib/index.js",
   ],
 };
 

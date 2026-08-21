@@ -20,9 +20,11 @@ const KEYLESS_HEADER = "X-Tavily-Access-Mode";
 const DEFAULT_MAX_RESULTS = 8;
 
 async function tavilyKeylessSearch(query, maxResults, signal) {
+	const n = Math.trunc(Number(maxResults));
+	const clamped = Number.isFinite(n) ? Math.min(Math.max(n, 1), 20) : DEFAULT_MAX_RESULTS;
 	const body = {
 		query,
-		max_results: maxResults ?? DEFAULT_MAX_RESULTS,
+		max_results: clamped,
 		search_depth: "basic",
 		include_answer: false,
 	};
@@ -33,7 +35,7 @@ async function tavilyKeylessSearch(query, maxResults, signal) {
 			[KEYLESS_HEADER]: "keyless",
 		},
 		body: JSON.stringify(body),
-		signal,
+		signal: signal ?? AbortSignal.timeout(30_000),
 	});
 	const text = await response.text();
 	let data = null;
@@ -43,7 +45,10 @@ async function tavilyKeylessSearch(query, maxResults, signal) {
 		data = null;
 	}
 	if (!response.ok) {
-		const detail = data && data.detail ? ` — ${data.detail}` : "";
+		const rawDetail = data && data.detail ? data.detail : "";
+		const detail = rawDetail
+			? ` — ${typeof rawDetail === "string" ? rawDetail : JSON.stringify(rawDetail).slice(0, 300)}`
+			: "";
 		throw new Error(`Tavily keyless search failed (HTTP ${response.status})${detail}`);
 	}
 	const sources = (data && Array.isArray(data.results) ? data.results : [])

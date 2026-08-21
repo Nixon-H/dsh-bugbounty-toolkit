@@ -20,7 +20,7 @@ That single command:
 
 1. copies the **3 custom plugins** into `~/.dsh/profiles/web/node_modules/`;
 2. installs the **full `cordis.patch.yml`** (all 23+ tool/plugin re-enables, `web` → `tavily-keyless` search provider, and the 3 plugin inserts). If a `cordis.patch.yml` already exists it is backed up to `cordis.patch.yml.bak.<timestamp>` first;
-3. installs **`settings.yaml`** (keyless deepseek providers — only if you have none) and **`web-search-bridge.py`** (only if missing);
+3. installs **`settings.yaml`** (keyless deepseek providers — only if you have none) and **`web-search-bridge.py`** (only if missing). **Note:** the shipped `settings.yaml` sets `permission.defaultPreset: danger-full-access` (no tool-approval prompts — intentional for this profile; edit it if you want approvals);
 4. keeps any profile root files you already have (`cordis.yml`, `package.json`, `pnpm-workspace.yaml`).
 
 Custom profile/home:
@@ -113,7 +113,7 @@ Built from the last-night bughunt research (everything merged into plugin code):
 
 | Bughunt artifact | Lives now in |
 |---|---|
-| `rules/bug-bounty.md` | `bb_checklist` (79 categories: recon, IDOR/BAC, SSRF, auth, XSS, SQLi, business logic, API misconfig, subdomain takeover, CSRF/open redirect, file upload, engagement, reporting, registration-flows + 26 article-derived categories: actuator, js-recon, origin-ip, crlf, host-header, rate-limit, 403-bypass, email-field, mass-assignment, punycode, blind-xss, waf-bypass, framework-cves, github-recon, iis-fuzzing, nuclei-dast, s3-recon, swagger, wayback-mining, fuzz-pipeline, sqli-recon, open-redirect, cache-deception, wordpress, ct-monitor, url-collection + 5 cheat-sheet categories: sensitive-data, lfi, cors, google-dorks, … + 30 new: ssti-injection, xxe-injection, deserialization, jwt-attacks, graphql, http-smuggling, race-condition, nosql-injection, ldap-injection, oauth-sso, mfa-2fa-bypass, captcha-bypass, password-reset-flaw, session-management, source-leak, shadow-api, ntlm-info, grpc, websocket, dom-attacks, prototype-pollution, cache-poisoning, llm-ai, mobile-app, cloud-misconfig, k8s-docker, enterprise-platforms, cicd-supply-chain, web3-audit, offensive-osint + 5 sync-added: leak-monitoring, bug-chaining, fuzzing-0day, timing-xsleaks, client-apps) |
+| `rules/bug-bounty.md` | `bb_checklist` (90 categories: 24 core categories — recon, IDOR/BAC, SSRF, auth, XSS, SQLi, business logic, API misconfig, subdomain takeover, CSRF/open redirect, file upload, engagement, reporting, registration-flows + 26 article-derived categories: actuator, js-recon, origin-ip, crlf, host-header, rate-limit, 403-bypass, email-field, mass-assignment, punycode, blind-xss, waf-bypass, framework-cves, github-recon, iis-fuzzing, nuclei-dast, s3-recon, swagger, wayback-mining, fuzz-pipeline, sqli-recon, open-redirect, cache-deception, wordpress, ct-monitor, url-collection + 5 cheat-sheet categories: sensitive-data, lfi, cors, google-dorks, … + 30 new: ssti-injection, xxe-injection, deserialization, jwt-attacks, graphql, http-smuggling, race-condition, nosql-injection, ldap-injection, oauth-sso, mfa-2fa-bypass, captcha-bypass, password-reset-flaw, session-management, source-leak, shadow-api, ntlm-info, grpc, websocket, dom-attacks, prototype-pollution, cache-poisoning, llm-ai, mobile-app, cloud-misconfig, k8s-docker, enterprise-platforms, cicd-supply-chain, web3-audit, offensive-osint + 5 sync-added: leak-monitoring, bug-chaining, fuzzing-0day, timing-xsleaks, client-apps; later rounds added second-order-injection, dos-resource-exhaustion, hash-archive-cracking, idp-confusion, windows-lpe, fix-bypass-retest, formal-verification, gas-qa-audit, c-cpp, rust, go, js-ts) |
 | `rules/source-audit.md` | `bb_source_audit` (7-step audit flow, per-language checks + grep patterns) |
 | `rules/shell-strategy.md` | Engagement/ops guidance (scope-first, 24h disclosure) |
 | `obsidian-templates/bug-report.md` + `FINDINGS.md` (SQLite audit, verdict classes) | `bb_triage` |
@@ -130,11 +130,12 @@ config/dsh-profile/           # live-profile snapshot (byte-identical clones)
 plugins/dsh-bugbounty/        # DSH plugin: 53 bb_* tools + bbApi export
 plugins/dsh-opencode-search/  # DSH plugin: tavily-keyless search provider + searchApi export
 plugins/dsh-nixon-hud/        # DSH plugin: web GUI plugins/state HUD
-opencode/bugbounty.js         # OpenCode adapter (52 tools) — optional
+opencode/bugbounty.js         # OpenCode adapter (54 tools: 53 bb_* + bb_web_search) — optional
 tools/patch_cordis.py         # advanced: idempotent cordis.patch.yml patcher (optional utility)
 install.sh                    # DSH one-click full-profile installer
 install-opencode.sh           # OpenCode installer (optional)
 docs/bughunt-templates/       # obsidian notebook templates from the research
+docs/articles/                # methodology-article URL lists (texts/ is gitignored — copyright; fetch via the URL lists)
 ```
 
 ## How it works

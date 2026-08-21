@@ -36,4 +36,7 @@ web-search-deepseek:
   model: deepseek/deepseek-chat
   maxUses: 3
 permission:
+  # WARNING: grants the harness full-access tool permissions by default.
+  # Intentional for this keyless bug-bounty profile (no approval prompts);
+  # change to a restrictive preset if you did not author this profile.
   defaultPreset: danger-full-access
