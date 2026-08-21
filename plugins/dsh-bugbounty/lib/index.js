@@ -224,7 +224,7 @@ async function crtSh(domain, exec) {
 	const out = [];
 	for (const entry of data) {
 		const nv = String(entry && entry.name_value || "");
-		for (const raw of nv.split(/\s+/)) {
+		for (const raw of nv.split(/[\s,]+/)) {
 			const nm = raw.toLowerCase().replace(/\.$/, "");
 			if (!nm || nm.startsWith("*")) continue;
 			if (nm === domain || nm.endsWith(`.${domain}`)) out.push(nm);
@@ -402,7 +402,7 @@ async function techDetect(url, exec) {
 		}
 		if ((h["x-powered-by"] || "").toLowerCase().includes("plesklin")) push("panel", "Plesk", h["x-powered-by"]);
 		for (const p of BODY_PATTERNS) {
-			if (p.hint && body.includes(p.hint)) push(p.category, p.name, p.hint);
+			if (p.hint && body.toLowerCase().includes(p.hint.toLowerCase())) push(p.category, p.name, p.hint);
 			else if (p.re && p.re.test(body)) push(p.category, p.name, p.re.source.slice(0, 80));
 		}
 		if (h["x-generator"]) push("other", String(h["x-generator"]).replace(/["']/g, "").slice(0, 60), "x-generator");
@@ -2834,7 +2834,8 @@ const TOOLS = [
 				const schemes = (port === 443 || port === 8443) ? ["https", "http"] : ["http", "https"];
 				for (const scheme of schemes) attempts.push({ scheme, port });
 			}
-			const results = await mapPool(attempts, 4, (a) => probeOnce(host, a.scheme, a.port, exec));
+			const de = deadlineExec(exec, 80000);
+			const results = await mapPool(attempts, 4, (a) => probeOnce(host, a.scheme, a.port, de));
 			return { host, results };
 		}
 	},
@@ -3359,11 +3360,17 @@ const TOOLS = [
 				];
 				const highRe = /(heapdump|env|shutdown|jolokia|loggers|gateway|restart|refresh|sessions|auditevents|configprops|threaddump|httptrace|prometheus|flyway|liquibase|mappings)/;
 				const seen = new Set();
-				const probe = async (path) => {
+				const dupFiltered = [];
+				for (const path of [...paths, ...mutations]) {
 					const p = basePath + path;
 					const full = origin + p;
-					if (seen.has(full)) return;
+					if (seen.has(full)) continue;
 					seen.add(full);
+					dupFiltered.push(path);
+				}
+				const probeResults = await mapPool(dupFiltered, 8, async (path) => {
+					const p = basePath + path;
+					const full = origin + p;
 					const r = await fetchWithHeader(
 						full,
 						exec,
@@ -3371,17 +3378,17 @@ const TOOLS = [
 						"127.0.0.1",
 						"manual"
 					);
-					out.checked++;
 					// 3xx (SSO-login bounces, catchall redirects) are NOT actuator hits — no follow
 					const hit = (r.status >= 200 && r.status < 300) || r.status === 401 || r.status === 403;
 					let flag = "";
-					if (hit) {
-						flag = (r.status < 300 && highRe.test(path)) ? "high" : "found";
-						if (flag === "high") out.highRisk.push(path);
-					}
-					if (hit) out.endpoints.push({ path, status: r.status, ctype: r.ctype, size: r.size, flag });
-				};
-				await mapPool([...paths, ...mutations], 8, (p) => probe(p));
+					if (hit) flag = (r.status < 300 && highRe.test(path)) ? "high" : "found";
+					return { path, status: r.status, ctype: r.ctype, size: r.size, flag, hit };
+				});
+				for (const r of probeResults) {
+					out.checked++;
+					if (r.flag === "high") out.highRisk.push(r.path);
+					if (r.hit) out.endpoints.push({ path: r.path, status: r.status, ctype: r.ctype, size: r.size, flag: r.flag });
+				}
 				out.endpoints.sort((a, b) => (a.flag === "high" ? -1 : 1) - (b.flag === "high" ? -1 : 1));
 			} catch (e) {
 				out.error = shortErr(e);
@@ -3436,22 +3443,28 @@ const TOOLS = [
 					{ name: "jwt", re: /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g },
 					{ name: "generic_key", re: /\b(api[_-]?key|api_key|secret|token|password|passwd|pwd|client_secret|private_key)\b\s*[:=]\s*["'][^"']{8,}["']/gi },
 				];
-				await mapPool(urls, 8, async (u) => {
+				const jsResults = await mapPool(urls, 8, async (u) => {
 					try {
 						const { res } = await fetchRes(u, exec, { budget: 10000 });
 						const txt = await readLimited(res, 500_000);
-						out.count++;
 						const found = [];
 						for (const p of patterns) {
 							const m = (txt.match(p.re) || []).slice(0, 8);
 							if (m.length) found.push(p.name + "=" + m[0].slice(0, 48));
 						}
-						if (found.length) out.urls.push({ url: u, found });
+						if (found.length) return { url: u, found, ok: true };
+						return { url: u, found: [], ok: true };
 					} catch {
 						// individual fetch failure — count it so a half-failed run is visible
-						fetchFails++;
+						return { url: u, found: [], ok: false };
 					}
 				});
+				for (const r of jsResults) {
+					if (r.ok) {
+						out.count++;
+						if (r.found.length) out.urls.push({ url: r.url, found: r.found });
+					} else fetchFails++;
+				}
 				if (fetchFails) {
 					out.note = (out.note ? out.note + "; " : "") + fetchFails + " of " + urls.length + " JS file(s) failed to fetch (network/blocked) — scanned " + out.count + ", results may under-report";
 				} else if (!out.urls.length && out.count) {
@@ -3518,7 +3531,7 @@ const TOOLS = [
 				};
 				out.baseline = await get(base);
 				const methods = ["POST", "PUT", "HEAD", "PATCH", "TRACE", "OPTIONS", "DELETE", "SEARCH", "PROPFIND"];
-				await mapPool(methods, 4, async (m) => {
+				const methodResults = await mapPool(methods, 4, async (m) => {
 					try {
 						const b = withBudget(exec, 6000);
 						let status = 0;
@@ -3529,11 +3542,12 @@ const TOOLS = [
 						} finally {
 							b.dispose();
 						}
-						out.methods.push({ value: m, status });
+						return { value: m, status };
 					} catch {
-						out.methods.push({ value: m, status: 0 });
+						return { value: m, status: 0 };
 					}
 				});
+				out.methods.push(...methodResults);
 				const hdrTests = [
 					["x-original-url", path],
 					["x-rewrite-url", path],
@@ -3545,21 +3559,23 @@ const TOOLS = [
 					["x-host", host],
 					["referer", origin + "/"],
 				];
-				await mapPool(hdrTests, 6, async ([h, val]) => {
+				const headerResults = await mapPool(hdrTests, 6, async ([h, val]) => {
 					const s = await get(base, { "user-agent": UA, [h]: val });
-					out.headers.push({ value: h + ": " + val, status: s });
+					return { value: h + ": " + val, status: s };
 				});
+				out.headers.push(...headerResults);
 				const pathTests = [
 					path + "/", path + "//", path + "/.", path + "/./", path + "..;/", path + ";",
 					path + ";.js", "/" + path.replace(/^\//, "") + "/", "/" + encodeURI(path.replace(/^\//, "")), path + "%2e",
 					path + "%2f", path + "%00", path + "?", path + "?x=1", path + "..%2f",
 					"/%2e%2e" + path, "/%252e%252e" + path, "/%c0%af" + path, path + ".json",
 				];
-				await mapPool(pathTests, 6, async (p) => {
+				const pathResults = await mapPool(pathTests, 6, async (p) => {
 					const u2 = new URL(u.origin + p);
 					const s = await get(u2.toString());
-					out.paths.push({ value: p, status: s });
+					return { value: p, status: s };
 				});
+				out.paths.push(...pathResults);
 				const interesting = (s) => s >= 200 && s < 400 && s !== out.baseline; // 2xx/3xx deltas only — 404/405/406/500 are noise, not bypasses
 				for (const m of out.methods) if (interesting(m.status)) out.changes.push({ kind: "method", value: m.value, status: m.status });
 				for (const h of out.headers) if (interesting(h.status)) out.changes.push({ kind: "header", value: h.value, status: h.status });
